@@ -3,20 +3,15 @@
 sir_js.py — JavaScript/TypeScript → SIR node graph parser.
 
 Parses JS/TS functions into the same canonical node graph format
-as sir1.py so deduplication works across Python and JavaScript.
+as sir1.py so deduplication works across Python and JavaScript/TypeScript.
 
 Supports:
   - function declarations:        function foo(a, b) { return a + b; }
   - arrow functions (assigned):   const foo = (a, b) => a + b;
-  - method definitions:           { foo(a, b) { return a + b; } }
   - async variants of all above
-
-Usage:
-  from sir_js import extract_js_functions, hash_js_source
-
-  funcs = extract_js_functions(js_source, "myfile.js")
-  for name, lineno, h in funcs:
-      print(name, lineno, h)
+  - TypeScript type annotations:  function foo(a: number, b: string): boolean
+  - TypeScript generics:          function identity<T>(arg: T): T
+  - TypeScript interfaces/types:  stripped before parsing
 """
 
 from __future__ import annotations
@@ -28,7 +23,80 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 # ─────────────────────────────────────────────
-#  Tokeniser — minimal JS lexer
+#  TypeScript pre-processor
+#  Strips TS-specific syntax before tokenising
+# ─────────────────────────────────────────────
+
+def strip_typescript(source: str) -> str:
+    """
+    Remove TypeScript-specific syntax to produce clean JS.
+    Handles: type annotations, generics, interfaces, type aliases,
+    access modifiers, decorators, non-null assertions.
+    """
+    # Remove single-line comments first to avoid false matches
+    # (we restore them after — actually just remove them for analysis)
+    lines = source.split('\n')
+    cleaned = []
+    in_block_comment = False
+
+    for line in lines:
+        if in_block_comment:
+            if '*/' in line:
+                line = line[line.index('*/') + 2:]
+                in_block_comment = False
+            else:
+                cleaned.append('')
+                continue
+        if '/*' in line and '*/' not in line[line.index('/*'):]:
+            line = line[:line.index('/*')]
+            in_block_comment = True
+        # Remove line comments
+        if '//' in line:
+            # Be careful not to strip URLs inside strings
+            line = re.sub(r'(?<!:)//.*$', '', line)
+        cleaned.append(line)
+
+    source = '\n'.join(cleaned)
+
+    # Remove decorators (@Something)
+    source = re.sub(r'@\w+(?:\([^)]*\))?\s*\n', '\n', source)
+
+    # Remove interface declarations
+    source = re.sub(r'\binterface\s+\w+\s*\{[^}]*\}', '', source, flags=re.DOTALL)
+
+    # Remove type alias declarations
+    source = re.sub(r'\btype\s+\w+\s*=\s*[^;]+;', '', source)
+
+    # Remove generic type parameters <T>, <T extends U>, <T, U>
+    # Do multiple passes for nested generics
+    for _ in range(3):
+        source = re.sub(r'<[A-Za-z_,\s\[\]?|&.extends=\'"]+>', '', source)
+
+    # Remove return type annotations: ): Type {  or ): Type =>
+    source = re.sub(r'\)\s*:\s*[\w\[\]|&<>.,\s?]+(?=\s*[\{=])', ')', source)
+
+    # Remove parameter type annotations: (a: Type, b: Type[])
+    # Handle complex types: string[], number | null, Record<string, any>
+    source = re.sub(r'(\w+)\s*\??\s*:\s*[\w\[\]|&<>.,\s?]+(?=[,)])', r'\1', source)
+
+    # Remove access modifiers in class constructors
+    source = re.sub(r'\b(public|private|protected|readonly)\s+', '', source)
+
+    # Remove non-null assertions
+    source = re.sub(r'(\w+)!\.', r'\1.', source)
+    source = re.sub(r'(\w+)!(?=[,)\s;])', r'\1', source)
+
+    # Remove 'as Type' casts
+    source = re.sub(r'\bas\s+\w[\w<>\[\]|&.,\s]*', '', source)
+
+    # Remove 'abstract' keyword
+    source = re.sub(r'\babstract\s+', '', source)
+
+    return source
+
+
+# ─────────────────────────────────────────────
+#  Tokeniser
 # ─────────────────────────────────────────────
 
 TOKEN_RE = re.compile(r"""
@@ -50,7 +118,10 @@ KEYWORDS = {
     'continue', 'new', 'this', 'class', 'extends', 'import', 'export',
     'default', 'try', 'catch', 'finally', 'throw', 'typeof', 'instanceof',
     'in', 'of', 'true', 'false', 'null', 'undefined', 'void', 'delete',
-    'static', 'get', 'set', 'yield', 'from', 'as', 'super'
+    'static', 'get', 'set', 'yield', 'from', 'as', 'super',
+    # TypeScript keywords (kept for awareness, stripped in pre-processor)
+    'interface', 'type', 'enum', 'namespace', 'declare', 'abstract',
+    'implements', 'readonly', 'keyof', 'infer', 'never', 'unknown'
 }
 
 
@@ -78,7 +149,6 @@ def tokenize(source: str) -> List[Tuple[str, str, int]]:
 # ─────────────────────────────────────────────
 
 def find_matching_brace(tokens: List, start: int) -> int:
-    """Find index of closing } matching opening { at tokens[start]."""
     depth = 0
     for i in range(start, len(tokens)):
         kind, val, _ = tokens[i]
@@ -92,7 +162,6 @@ def find_matching_brace(tokens: List, start: int) -> int:
 
 
 def find_matching_paren(tokens: List, start: int) -> int:
-    """Find index of closing ) matching opening ( at tokens[start]."""
     depth = 0
     for i in range(start, len(tokens)):
         kind, val, _ = tokens[i]
@@ -106,12 +175,10 @@ def find_matching_paren(tokens: List, start: int) -> int:
 
 
 def extract_params(tokens: List, open_paren: int, close_paren: int) -> List[str]:
-    """Extract parameter names from token slice."""
     params = []
     for i in range(open_paren + 1, close_paren):
         kind, val, _ = tokens[i]
         if kind == 'WORD':
-            # skip destructuring keywords and default value tokens
             params.append(val)
     return params
 
@@ -120,11 +187,16 @@ def tokens_to_source(tokens: List) -> str:
     return " ".join(val for _, val, _ in tokens)
 
 
-def extract_js_functions(source: str, filename: str) -> List[Tuple[str, int, str]]:
+def extract_js_functions(source: str, filename: str) -> List[Tuple[str, int, List[str], str]]:
     """
-    Extract (qualname, lineno, body_token_slice) for each function in JS source.
-    Returns list of (name, lineno, body_source).
+    Extract (qualname, lineno, params, body_source) for each function.
+    Handles both JS and TS (strips TS annotations first).
     """
+    # Detect TypeScript
+    is_ts = filename.endswith(('.ts', '.tsx'))
+    if is_ts:
+        source = strip_typescript(source)
+
     tokens = tokenize(source)
     results = []
     i = 0
@@ -133,39 +205,45 @@ def extract_js_functions(source: str, filename: str) -> List[Tuple[str, int, str
     while i < n:
         kind, val, line = tokens[i]
 
-        # ── Pattern 1: function foo(...) { }
+        # ── Pattern 1: [async] function name(...) { }
+        is_async = kind == 'KW' and val == 'async'
+        start_i = i
+        if is_async and i + 1 < n:
+            i += 1
+            kind, val, line = tokens[i]
+
         if kind == 'KW' and val == 'function':
             name = 'anonymous'
             j = i + 1
-            # optional async already handled before 'function', skip name
             if j < n and tokens[j][0] == 'WORD':
                 name = tokens[j][1]
                 j += 1
-            # find params
             if j < n and tokens[j][1] == '(':
                 close_p = find_matching_paren(tokens, j)
                 params = extract_params(tokens, j, close_p)
                 j = close_p + 1
-                # find body
                 if j < n and tokens[j][1] == '{':
                     close_b = find_matching_brace(tokens, j)
                     body_tokens = tokens[j:close_b + 1]
                     results.append((name, line, params, body_tokens))
                     i = close_b + 1
                     continue
+            i = start_i + 1
+            continue
 
-        # ── Pattern 2: const/let/var foo = (...) => { } or (...) => expr
+        # ── Pattern 2: const/let/var name = [async] (...) => body
         elif kind == 'KW' and val in ('const', 'let', 'var'):
             j = i + 1
             if j < n and tokens[j][0] == 'WORD':
                 name = tokens[j][1]
                 j += 1
-                if j < n and tokens[j][0] == 'OP' and '=' in tokens[j][1] and tokens[j][1] != '=>':
+                # expect = (not ==, =>, !=)
+                if j < n and tokens[j][0] == 'OP' and tokens[j][1] == '=':
                     j += 1
                     # optional async
-                    if j < n and tokens[j] == ('KW', 'async', tokens[j][2]):
+                    if j < n and tokens[j][0] == 'KW' and tokens[j][1] == 'async':
                         j += 1
-                    # arrow function: (params) => body
+                    # arrow function with parens
                     if j < n and tokens[j][1] == '(':
                         close_p = find_matching_paren(tokens, j)
                         params = extract_params(tokens, j, close_p)
@@ -179,7 +257,7 @@ def extract_js_functions(source: str, filename: str) -> List[Tuple[str, int, str
                                 i = close_b + 1
                                 continue
                             else:
-                                # expression body — collect until ; or end
+                                # expression body
                                 expr_end = j
                                 depth = 0
                                 while expr_end < n:
@@ -197,10 +275,32 @@ def extract_js_functions(source: str, filename: str) -> List[Tuple[str, int, str
                                 results.append((name, line, params, body_tokens))
                                 i = expr_end + 1
                                 continue
+                    # arrow with single param no parens: const foo = x => x + 1
+                    elif j < n and tokens[j][0] == 'WORD':
+                        param_name = tokens[j][1]
+                        j += 1
+                        if j < n and tokens[j][0] == 'ARROW':
+                            j += 1
+                            expr_end = j
+                            depth = 0
+                            while expr_end < n:
+                                ek, ev, _ = tokens[expr_end]
+                                if ev in ('(', '[', '{'):
+                                    depth += 1
+                                elif ev in (')', ']', '}'):
+                                    if depth == 0:
+                                        break
+                                    depth -= 1
+                                elif ek == 'PUNCT' and ev == ';' and depth == 0:
+                                    break
+                                expr_end += 1
+                            body_tokens = [('PUNCT', '{', line)] + tokens[j:expr_end] + [('PUNCT', '}', line)]
+                            results.append((name, line, [param_name], body_tokens))
+                            i = expr_end + 1
+                            continue
 
         i += 1
 
-    # Convert to (name, lineno, source_str)
     out = []
     for name, lineno, params, body_tokens in results:
         body_src = tokens_to_source(body_tokens)
@@ -220,17 +320,9 @@ def _node_id(data: Dict) -> str:
 
 def canonicalize_js(params: List[str], body_tokens: List) -> Dict:
     """
-    Build a canonical SIR node graph from JS function params + body tokens.
-    
-    Strategy:
-    - Rename all param names to v0, v1, v2...
-    - Rename all locally assigned variables to v{n}...
-    - Keep operators, punctuation, keywords as-is
-    - Hash the resulting canonical token sequence
-    
-    This matches the Python SIR approach of alpha-renaming identifiers.
+    Build canonical SIR node graph from JS/TS function params + body tokens.
+    Alpha-renames all identifiers to v0, v1, v2... matching Python SIR approach.
     """
-    # Build rename map for params
     rename: Dict[str, str] = {}
     counter = [0]
 
@@ -243,8 +335,7 @@ def canonicalize_js(params: List[str], body_tokens: List) -> Dict:
     for p in params:
         alloc(p)
 
-    # First pass — find all assignments to catch local vars
-    # Simple heuristic: WORD followed by = (not ==, =>, !=, <=, >=)
+    # Find local assignments
     tokens = body_tokens
     for i, (kind, val, line) in enumerate(tokens):
         if kind == 'WORD' and i + 1 < len(tokens):
@@ -252,7 +343,7 @@ def canonicalize_js(params: List[str], body_tokens: List) -> Dict:
             if nk == 'OP' and nv == '=':
                 alloc(val)
 
-    # Second pass — build canonical token sequence
+    # Build canonical token sequence
     canonical_tokens = []
     for kind, val, _ in tokens:
         if kind == 'WORD':
@@ -266,7 +357,6 @@ def canonicalize_js(params: List[str], body_tokens: List) -> Dict:
 
     canonical_seq = " ".join(canonical_tokens)
 
-    # Build node graph (simple linear for JS — matches SIR format)
     root_data = {
         "type": "JSFunction",
         "params": [f"v{i}" for i in range(len(params))],
@@ -291,14 +381,10 @@ def canonicalize_js(params: List[str], body_tokens: List) -> Dict:
 
 
 def hash_js_source(source: str, filename: str = "<js>") -> List[Tuple[str, int, str]]:
-    """
-    Returns list of (qualname, lineno, sir_sha256) for each function in JS source.
-    Ready to plug into the same deduplication pipeline as Python.
-    """
+    """Returns list of (qualname, lineno, sir_sha256) for each function."""
     funcs = extract_js_functions(source, filename)
     results = []
     for name, lineno, params, body_src in funcs:
-        # Re-tokenize body for canonicalization
         body_tokens = tokenize(body_src)
         sir = canonicalize_js(params, body_tokens)
         results.append((name, lineno, sir["sir_sha256"]))
@@ -312,7 +398,7 @@ def hash_js_source(source: str, filename: str = "<js>") -> List[Tuple[str, int, 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("Usage: python3 sir_js.py <file.js>")
+        print("Usage: python3 sir_js.py <file.js|file.ts>")
         sys.exit(1)
 
     path = sys.argv[1]
