@@ -245,8 +245,8 @@ st.set_page_config(page_title="SIR Engine", layout="wide", page_icon="🔍")
 st.title("🔍 SIR Engine")
 st.caption("Semantic duplicate detection, structural compression, and code diffing for Python.")
 
-tab_scan, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
-    "Scan", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
+tab_scan, tab_js, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
+    "Scan (Python)", "Scan (JavaScript)", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
 ])
 
 
@@ -338,6 +338,73 @@ with tab_scan:
                 st.download_button("📥 Download report (JSON)", data=json.dumps(report, indent=2),
                                    file_name="sir_report.json", mime="application/json")
 
+
+
+# ─────────────────────────────────────────────
+#  SCAN JS
+# ─────────────────────────────────────────────
+
+with tab_js:
+    st.subheader("Scan: find structurally duplicate JavaScript functions")
+    st.write("Upload .js or .ts files — SIR finds functions that are logically identical even if named differently.")
+
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    try:
+        from sir_js import hash_js_source, extract_js_functions, tokenize as js_tokenize, canonicalize_js
+        js_available = True
+    except ImportError:
+        js_available = False
+
+    if not js_available:
+        st.error("sir_js.py not found. Make sure it is in the same folder as sir_ui.py.")
+    else:
+        js_uploaded = st.file_uploader("Upload JavaScript/TypeScript files", type=["js", "ts", "jsx", "tsx"], accept_multiple_files=True, key="js_upload")
+        js_min_cluster = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="js_min")
+
+        if st.button("Run JS scan", type="primary"):
+            if not js_uploaded:
+                st.warning("Please upload at least one .js or .ts file.")
+            else:
+                js_groups = defaultdict(list)
+                total_js_funcs = 0
+                progress = st.progress(0, text="Starting JS scan...")
+                status = st.empty()
+
+                for i, f in enumerate(js_uploaded):
+                    status.text(f"Scanning {f.name}...")
+                    src = f.read().decode("utf-8", errors="replace")
+                    funcs = extract_js_functions(src, f.name)
+                    for name, lineno, params, body_src in funcs:
+                        total_js_funcs += 1
+                        body_tokens = js_tokenize(body_src)
+                        sir = canonicalize_js(params, body_tokens)
+                        h = sir["sir_sha256"]
+                        js_groups[h].append({"file": f.name, "name": name, "lineno": lineno, "body": body_src})
+                    progress.progress((i + 1) / len(js_uploaded), text=f"Scanned {i+1}/{len(js_uploaded)} files")
+
+                progress.progress(1.0, text="Scan complete!")
+                status.empty()
+
+                js_dupes = {h: v for h, v in js_groups.items() if len(v) >= int(js_min_cluster)}
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Files", len(js_uploaded))
+                c2.metric("Functions", total_js_funcs)
+                c3.metric("Unique structures", len(js_groups))
+                c4.metric(f"Duplicate clusters", len(js_dupes))
+                st.divider()
+
+                if not js_dupes:
+                    st.success("No duplicate JavaScript function structures found!")
+                else:
+                    st.error(f"Found {len(js_dupes)} duplicate cluster(s)")
+                    for h, occs in sorted(js_dupes.items(), key=lambda x: -len(x[1])):
+                        with st.expander(f"🔴 {len(occs)} duplicates — hash: {h[:16]}...", expanded=True):
+                            st.caption(f"Full hash: {h}")
+                            for o in occs:
+                                st.markdown(f"**{o['name']}** in {o['file']} (line {o['lineno']})")
+                                st.code(o["body"], language="javascript")
 
 # ─────────────────────────────────────────────
 #  PACK
