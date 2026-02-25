@@ -11,6 +11,7 @@ import json
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -65,6 +66,177 @@ def occurrence_filename(r: Dict[str, Any], idx: int) -> str:
     return f"{idx:04d}_{file_part}_L{line}_{qual}_{root8}.py"
 
 
+def count_lines(src: str) -> int:
+    return len([l for l in src.splitlines() if l.strip()])
+
+
+def build_merge_report(
+    file_sources: Dict[str, str],
+    modified_sources: Dict[str, str],
+    dupes_data: Dict[str, List],
+    canonical_names: Dict[str, str],
+    utils_functions: Dict[str, str],
+) -> str:
+    """Build a self-contained HTML summary report for a merge operation."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    total_removed = sum(len(occs) - 1 for occs in dupes_data.values())
+    orig_lines = sum(count_lines(s) for s in file_sources.values())
+    new_lines = sum(count_lines(s) for s in modified_sources.values())
+    saved = orig_lines - new_lines
+
+    clusters_html = ""
+    for h, occs in dupes_data.items():
+        canon = canonical_names.get(h, occs[0]["qualname"])
+        dupes_list = "".join(
+            f'<li><code>{o["qualname"]}</code> in <code>{o["file"]}</code> line {o["lineno"]}'
+            f'{"  <span class=\"badge kept\">KEPT</span>" if o["qualname"] == canon else "  <span class=\"badge removed\">REMOVED</span>"}</li>'
+            for o in occs
+        )
+        clusters_html += f"""
+        <div class="cluster">
+            <div class="cluster-header">
+                Hash <code>{h[:24]}...</code> — {len(occs)} duplicates
+            </div>
+            <div class="cluster-body">
+                <p>Canonical name kept: <strong><code>{canon}</code></strong> → moved to <code>utils.py</code></p>
+                <ul>{dupes_list}</ul>
+            </div>
+        </div>"""
+
+    files_html = ""
+    for fname in file_sources:
+        orig = count_lines(file_sources[fname])
+        new = count_lines(modified_sources.get(fname, ""))
+        delta = orig - new
+        color = "#2ecc71" if delta > 0 else "#aaa"
+        files_html += f"""
+        <tr>
+            <td><code>{fname}</code></td>
+            <td>{orig}</td>
+            <td>{new}</td>
+            <td style="color:{color}">-{delta}</td>
+        </tr>"""
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SIR Engine Merge Report</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0e1117; color: #e0e0e0; margin: 0; padding: 32px; }}
+  h1 {{ color: #fff; border-bottom: 2px solid #333; padding-bottom: 12px; }}
+  h2 {{ color: #aaa; font-size: 1rem; text-transform: uppercase; letter-spacing: 1px; margin-top: 32px; }}
+  .summary {{ display: flex; gap: 16px; margin: 24px 0; flex-wrap: wrap; }}
+  .card {{ background: #1c1f26; border-radius: 8px; padding: 20px 28px; min-width: 140px; }}
+  .card .num {{ font-size: 2rem; font-weight: bold; color: #fff; }}
+  .card .label {{ color: #888; font-size: 0.85rem; margin-top: 4px; }}
+  .cluster {{ background: #1c1f26; border-radius: 8px; margin: 12px 0; overflow: hidden; }}
+  .cluster-header {{ background: #2a2d36; padding: 12px 16px; font-size: 0.9rem; }}
+  .cluster-body {{ padding: 12px 16px; }}
+  code {{ background: #2a2d36; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }}
+  ul {{ margin: 8px 0; padding-left: 20px; }}
+  li {{ margin: 4px 0; line-height: 1.6; }}
+  .badge {{ display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.75rem;
+            font-weight: bold; margin-left: 6px; }}
+  .kept {{ background: #1a4a2e; color: #2ecc71; }}
+  .removed {{ background: #4a1a1a; color: #e74c3c; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
+  th {{ text-align: left; color: #888; font-size: 0.8rem; padding: 8px; border-bottom: 1px solid #333; }}
+  td {{ padding: 8px; border-bottom: 1px solid #222; font-size: 0.85rem; }}
+  .footer {{ margin-top: 40px; color: #555; font-size: 0.8rem; border-top: 1px solid #222; padding-top: 16px; }}
+</style>
+</head>
+<body>
+<h1>🔍 SIR Engine — Merge Report</h1>
+<p style="color:#888">Generated {now}</p>
+
+<div class="summary">
+  <div class="card"><div class="num">{len(file_sources)}</div><div class="label">Files processed</div></div>
+  <div class="card"><div class="num">{len(dupes_data)}</div><div class="label">Duplicate clusters</div></div>
+  <div class="card"><div class="num">{total_removed}</div><div class="label">Functions removed</div></div>
+  <div class="card"><div class="num">{len(utils_functions)}</div><div class="label">Functions in utils.py</div></div>
+  <div class="card"><div class="num" style="color:#2ecc71">-{saved}</div><div class="label">Lines saved</div></div>
+</div>
+
+<h2>Duplicate Clusters</h2>
+{clusters_html}
+
+<h2>File Summary</h2>
+<table>
+  <tr><th>File</th><th>Original lines</th><th>New lines</th><th>Saved</th></tr>
+  {files_html}
+</table>
+
+<div class="footer">
+  Built with SIR Engine — github.com/lflin00/SRI-ENGINE
+</div>
+</body>
+</html>"""
+
+
+# ─────────────────────────────────────────────
+#  Merge helpers
+# ─────────────────────────────────────────────
+
+def remove_function_node(tree: ast.Module, func_name: str) -> ast.Module:
+    tree.body = [
+        node for node in tree.body
+        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name)
+    ]
+    return tree
+
+
+def rename_calls(source: str, old_name: str, new_name: str) -> str:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    class CallRenamer(ast.NodeTransformer):
+        def visit_Call(self, node):
+            self.generic_visit(node)
+            if isinstance(node.func, ast.Name) and node.func.id == old_name:
+                node.func.id = new_name
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == old_name:
+                node.func.attr = new_name
+            return node
+
+    new_tree = CallRenamer().visit(tree)
+    ast.fix_missing_locations(new_tree)
+    try:
+        return ast.unparse(new_tree)
+    except Exception:
+        return source
+
+
+def add_import(source: str, func_name: str) -> str:
+    import_line = f"from utils import {func_name}"
+    if import_line in source:
+        return source
+    lines = source.splitlines()
+    insert_at = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("import ") or stripped.startswith("from "):
+            insert_at = i + 1
+    lines.insert(insert_at, import_line)
+    return "\n".join(lines)
+
+
+def get_function_source(source: str, func_name: str) -> str:
+    try:
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+                seg = ast.get_source_segment(source, node)
+                if seg:
+                    return seg
+    except SyntaxError:
+        pass
+    return ""
+
+
 # ─────────────────────────────────────────────
 #  Page config
 # ─────────────────────────────────────────────
@@ -97,15 +269,21 @@ with tab_scan:
         if not uploaded:
             st.warning("Please upload at least one .py file.")
         else:
+            # Store file sources for syntax highlighting
+            scan_sources: Dict[str, str] = {}
             groups: Dict[str, List[Occur]] = defaultdict(list)
+            # Also store code per (file, qualname) for syntax highlighting
+            func_code_map: Dict[str, str] = {}
             total_funcs = 0
             progress = st.progress(0, text="Starting scan...")
             status = st.empty()
             for i, f in enumerate(uploaded):
                 status.text(f"Scanning {f.name}...")
                 src = f.read().decode("utf-8", errors="replace")
+                scan_sources[f.name] = src
                 for qualname, lineno, code in extract_functions(src, f.name, include_methods):
                     total_funcs += 1
+                    func_code_map[f"{f.name}::{qualname}"] = code
                     try:
                         h = hash_source(code, mode="semantic")
                         groups[h].append(Occur(file=f.name, qualname=qualname, lineno=lineno, semantic_hash=h))
@@ -130,8 +308,23 @@ with tab_scan:
                 st.error(f"⚠️ Found {len(dupes)} duplicate cluster(s)")
                 for h, occs in sorted(dupes.items(), key=lambda x: (-len(x[1]), x[0])):
                     with st.expander(f"🔴 {len(occs)} duplicates — hash: `{h[:16]}...`", expanded=True):
+                        # Copy hash button
+                        col_h, col_btn = st.columns([5, 1])
+                        with col_h:
+                            st.caption(f"Full hash: `{h}`")
+                        with col_btn:
+                            st.button("📋 Copy hash", key=f"copy_{h}",
+                                      on_click=lambda hh=h: st.session_state.update({"copied_hash": hh}))
+
                         for o in occs:
-                            st.markdown(f"- **`{o.qualname}`** in `{o.file}` (line {o.lineno})")
+                            st.markdown(f"**`{o.qualname}`** in `{o.file}` (line {o.lineno})")
+                            # Syntax highlighted code
+                            code_key = f"{o.file}::{o.qualname}"
+                            if code_key in func_code_map:
+                                st.code(func_code_map[code_key], language="python")
+
+                if "copied_hash" in st.session_state:
+                    st.info(f"Hash copied: `{st.session_state['copied_hash']}`")
 
                 report = {
                     "files_scanned": len(uploaded),
@@ -166,11 +359,13 @@ with tab_pack:
             namemaps: Dict[str, Any] = {}
             total_funcs = 0
             errors = 0
+            total_orig_bytes = 0
             progress = st.progress(0, text="Starting pack...")
             status = st.empty()
             for i, f in enumerate(pack_uploaded):
                 status.text(f"Encoding {f.name}...")
                 src = f.read().decode("utf-8", errors="replace")
+                total_orig_bytes += len(src.encode("utf-8"))
                 funcs = extract_functions(src, f.name, pack_methods)
                 total_funcs += len(funcs)
                 for qualname, lineno, code in funcs:
@@ -203,12 +398,20 @@ with tab_pack:
             }
             bundle = {"meta": meta, "nodes": global_nodes, "roots": roots, "namemaps": namemaps}
             bundle_json = json.dumps(bundle, separators=(",", ":"), sort_keys=True)
+            bundle_bytes = len(bundle_json.encode("utf-8"))
 
-            c1, c2, c3, c4 = st.columns(4)
+            # Dedup savings
+            total_roots = len(roots)
+            unique_roots = len({r["root"] for r in roots})
+            deduped = total_roots - unique_roots
+            size_reduction = 100 * (1 - bundle_bytes / max(total_orig_bytes, 1))
+
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Files packed", meta["files_scanned"])
             c2.metric("Functions", meta["total_functions"])
             c3.metric("Unique nodes", meta["unique_nodes"])
-            c4.metric("Bundle size", f"{len(bundle_json):,} bytes")
+            c4.metric("Duplicate structures removed", deduped)
+            c5.metric("Size vs original", f"{size_reduction:.1f}% smaller")
 
             if errors:
                 st.warning(f"{errors} function(s) failed to encode and were skipped.")
@@ -252,30 +455,25 @@ with tab_unpack:
 
                 st.write("**Pack info:**", meta)
 
-                # ── MODE 1: Full file restore ──
                 if "Full file restore" in unpack_mode:
                     st.info("Restoring full files with duplicates removed and calls updated...")
 
-                    # Group roots by original file
                     by_file: Dict[str, List[Dict]] = defaultdict(list)
                     for r in roots:
                         by_file[r["file"]].append(r)
 
-                    # Find duplicate structures (same sir_sha256, different qualnames)
                     hash_to_roots: Dict[str, List[Dict]] = defaultdict(list)
                     for r in roots:
                         if r.get("sir_sha256"):
                             hash_to_roots[r["sir_sha256"]].append(r)
                     dupes = {h: rs for h, rs in hash_to_roots.items() if len(rs) >= 2}
 
-                    # Pick canonical name for each dupe cluster (first occurrence wins)
-                    canonical_map: Dict[str, str] = {}  # qualname -> canonical_qualname
-                    canonical_funcs: Dict[str, str] = {}  # canonical_qualname -> reconstructed source
+                    canonical_map: Dict[str, str] = {}
+                    canonical_funcs: Dict[str, str] = {}
                     for h, rs in dupes.items():
                         canonical = rs[0]["qualname"]
                         for r in rs:
                             canonical_map[r["qualname"]] = canonical
-                        # Reconstruct canonical function source
                         root_id = rs[0]["root"]
                         nm = namemaps.get(root_id, {}) if rehydrate else {}
                         try:
@@ -284,7 +482,6 @@ with tab_unpack:
                         except Exception:
                             pass
 
-                    # Reconstruct each file
                     progress = st.progress(0, text="Starting restore...")
                     status = st.empty()
                     file_list = list(by_file.items())
@@ -293,33 +490,23 @@ with tab_unpack:
                     for i, (fname, file_roots) in enumerate(file_list):
                         status.text(f"Restoring {fname}...")
                         lines = []
+                        all_canonicals = set()
+                        for r in file_roots:
+                            q = r["qualname"]
+                            if q in canonical_map:
+                                all_canonicals.add(canonical_map[q])
+                            elif q in canonical_funcs:
+                                all_canonicals.add(q)
+                        if all_canonicals:
+                            lines.append(f"from utils import {', '.join(sorted(all_canonicals))}")
+                            lines.append("")
 
-                        # Add utils import if needed
-                        needs_import = [r["qualname"] for r in file_roots
-                                        if r["qualname"] in canonical_map
-                                        and canonical_map[r["qualname"]] != r["qualname"]]
-                        if needs_import or any(r["qualname"] in canonical_funcs for r in file_roots):
-                            all_canonicals = set()
-                            for r in file_roots:
-                                q = r["qualname"]
-                                if q in canonical_map:
-                                    all_canonicals.add(canonical_map[q])
-                                elif q in canonical_funcs:
-                                    all_canonicals.add(q)
-                            if all_canonicals:
-                                lines.append(f"from utils import {', '.join(sorted(all_canonicals))}")
-                                lines.append("")
-
-                        # Add non-duplicate functions (reconstruct from nodes)
                         for r in sorted(file_roots, key=lambda x: x.get("lineno", 0)):
                             qualname = r["qualname"]
-                            # Skip duplicates — they move to utils.py
                             if qualname in canonical_map and canonical_map[qualname] != qualname:
                                 continue
-                            # Skip canonicals too — they move to utils.py
                             if qualname in canonical_funcs:
                                 continue
-                            # Reconstruct this function
                             root_id = r["root"]
                             nm = namemaps.get(root_id, {}) if rehydrate else {}
                             try:
@@ -333,15 +520,11 @@ with tab_unpack:
                         progress.progress((i + 1) / len(file_list), text=f"Restored {i+1}/{len(file_list)} files")
 
                     progress.progress(1.0, text="Building utils.py...")
-
-                    # Build utils.py
                     utils_lines = ['"""utils.py — Canonical functions deduplicated by SIR Engine."""', ""]
                     for cname, csrc in canonical_funcs.items():
                         utils_lines.append(csrc)
                         utils_lines.append("")
                     reconstructed["utils.py"] = "\n".join(utils_lines)
-
-                    progress.progress(1.0, text="Creating zip...")
                     status.empty()
 
                     zip_buffer = io.BytesIO()
@@ -363,7 +546,6 @@ with tab_unpack:
                         mime="application/zip",
                     )
 
-                # ── MODE 2: Individual functions ──
                 else:
                     progress = st.progress(0, text="Starting unpack...")
                     status = st.empty()
@@ -423,22 +605,20 @@ with tab_verify:
         if not verify_bundle or not verify_files:
             st.warning("Please upload both the bundle.json and the restored .py files.")
         else:
-            with st.spinner("Verifying..."):
-                bundle = json.loads(verify_bundle.read().decode("utf-8"))
-                roots = bundle["roots"]
-
-                # Expected hashes from pack
-                expected = {r["sir_sha256"] for r in roots if r.get("sir_sha256")}
-
-                # Actual hashes from uploaded restored files
-                actual = set()
-                for f in verify_files:
-                    src = f.read().decode("utf-8", errors="replace")
-                    try:
-                        h = hash_source(src, mode="semantic")
-                        actual.add(h)
-                    except Exception:
-                        pass
+            progress = st.progress(0, text="Verifying...")
+            bundle = json.loads(verify_bundle.read().decode("utf-8"))
+            roots = bundle["roots"]
+            expected = {r["sir_sha256"] for r in roots if r.get("sir_sha256")}
+            actual = set()
+            for i, f in enumerate(verify_files):
+                src = f.read().decode("utf-8", errors="replace")
+                try:
+                    h = hash_source(src, mode="semantic")
+                    actual.add(h)
+                except Exception:
+                    pass
+                progress.progress((i + 1) / len(verify_files), text=f"Verified {i+1}/{len(verify_files)} files")
+            progress.progress(1.0, text="Done!")
 
             missing = expected - actual
             extra = actual - expected
@@ -494,9 +674,11 @@ with tab_diff:
                         pass
                 return hashes
 
-            with st.spinner("Diffing..."):
-                ha = hash_uploaded(files_a)
-                hb = hash_uploaded(files_b)
+            progress = st.progress(0, text="Diffing...")
+            ha = hash_uploaded(files_a)
+            progress.progress(0.5, text="Hashing Set B...")
+            hb = hash_uploaded(files_b)
+            progress.progress(1.0, text="Done!")
 
             set_a, set_b = set(ha.keys()), set(hb.keys())
             common = sorted(set_a & set_b)
@@ -524,74 +706,7 @@ with tab_diff:
 
 
 # ─────────────────────────────────────────────
-#  MERGE HELPERS
-# ─────────────────────────────────────────────
-
-def remove_function_node(tree: ast.Module, func_name: str) -> ast.Module:
-    """Remove a top-level function definition from an AST."""
-    tree.body = [
-        node for node in tree.body
-        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name)
-    ]
-    return tree
-
-
-def rename_calls(source: str, old_name: str, new_name: str) -> str:
-    """Rename all calls to old_name -> new_name in source using AST rewrite."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return source
-
-    class CallRenamer(ast.NodeTransformer):
-        def visit_Call(self, node):
-            self.generic_visit(node)
-            if isinstance(node.func, ast.Name) and node.func.id == old_name:
-                node.func.id = new_name
-            elif isinstance(node.func, ast.Attribute) and node.func.attr == old_name:
-                node.func.attr = new_name
-            return node
-
-    new_tree = CallRenamer().visit(tree)
-    ast.fix_missing_locations(new_tree)
-    try:
-        return ast.unparse(new_tree)
-    except Exception:
-        return source
-
-
-def add_import(source: str, func_name: str) -> str:
-    """Add 'from utils import func_name' at the top if not already present."""
-    import_line = f"from utils import {func_name}"
-    if import_line in source:
-        return source
-    lines = source.splitlines()
-    # Insert after any existing imports
-    insert_at = 0
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("import ") or stripped.startswith("from "):
-            insert_at = i + 1
-    lines.insert(insert_at, import_line)
-    return "\n".join(lines)
-
-
-def get_function_source(source: str, func_name: str) -> str:
-    """Extract source of a named top-level function."""
-    try:
-        tree = ast.parse(source)
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
-                seg = ast.get_source_segment(source, node)
-                if seg:
-                    return seg
-    except SyntaxError:
-        pass
-    return ""
-
-
-# ─────────────────────────────────────────────
-#  MERGE TAB
+#  MERGE
 # ─────────────────────────────────────────────
 
 with tab_merge:
@@ -634,12 +749,10 @@ with tab_merge:
             status.empty()
 
             dupes = {h: occ for h, occ in groups.items() if len(occ) >= 2}
-
             st.session_state["merge_file_sources"] = file_sources
             st.session_state["merge_dupes"] = {h: [vars(o) for o in occ] for h, occ in dupes.items()}
             st.session_state["merge_total"] = total_funcs
 
-    # Show results and canonical picker
     if "merge_dupes" in st.session_state and st.session_state["merge_dupes"]:
         dupes_data = st.session_state["merge_dupes"]
         file_sources = st.session_state["merge_file_sources"]
@@ -648,37 +761,38 @@ with tab_merge:
         st.success(f"Found **{len(dupes_data)}** duplicate cluster(s) across {len(file_sources)} file(s).")
         st.write("For each cluster, pick which function name to keep as the canonical version:")
 
-        canonical_choices: Dict[str, str] = {}
-
         for h, occs in dupes_data.items():
             names = [o["qualname"] for o in occs]
             with st.expander(f"Cluster `{h[:16]}...` — {len(occs)} duplicates: {', '.join(f'`{n}`' for n in names)}", expanded=True):
                 cols = st.columns([3, 1])
                 with cols[0]:
-                    choice = st.selectbox(
-                        "Canonical name (keep this one)",
-                        options=names,
-                        key=f"canon_{h}",
-                    )
+                    st.selectbox("Canonical name (keep this one)", options=names, key=f"canon_{h}")
                 with cols[1]:
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown(f"**{len(occs) - 1}** duplicate(s) will be removed")
-                canonical_choices[h] = choice
+                # Show syntax highlighted code for each occurrence
+                for o in occs:
+                    src = file_sources.get(o["file"], "")
+                    code = get_function_source(src, o["qualname"])
+                    if code:
+                        st.markdown(f"**`{o['qualname']}`** in `{o['file']}` (line {o['lineno']})")
+                        st.code(code, language="python")
 
         st.divider()
 
         if st.button("🔀 Apply merge and download", type="primary"):
             modified_sources: Dict[str, str] = {k: v for k, v in file_sources.items()}
             utils_functions: Dict[str, str] = {}
+            canonical_names_used: Dict[str, str] = {}
             progress = st.progress(0, text="Applying merge...")
             status = st.empty()
             dupe_list = list(dupes_data.items())
 
             for i, (h, occs) in enumerate(dupe_list):
                 canonical_name = st.session_state.get(f"canon_{h}", occs[0]["qualname"])
+                canonical_names_used[h] = canonical_name
                 status.text(f"Merging cluster {i+1}/{len(dupe_list)}: keeping '{canonical_name}'...")
 
-                # Find the file containing the canonical function
                 canonical_occ = next((o for o in occs if o["qualname"] == canonical_name), occs[0])
                 canonical_file = canonical_occ["file"]
                 canonical_src = get_function_source(modified_sources[canonical_file], canonical_name)
@@ -686,17 +800,12 @@ with tab_merge:
                 if canonical_src:
                     utils_functions[canonical_name] = canonical_src
 
-                # Process each occurrence
                 for occ in occs:
                     fname = occ["file"]
                     func_name = occ["qualname"]
                     src = modified_sources[fname]
-
-                    # Rename all calls of this function to canonical name
                     if func_name != canonical_name:
                         src = rename_calls(src, func_name, canonical_name)
-
-                    # Remove the duplicate function definition (keep canonical in utils.py)
                     try:
                         tree = ast.parse(src)
                         tree = remove_function_node(tree, func_name)
@@ -704,12 +813,9 @@ with tab_merge:
                         src = ast.unparse(tree)
                     except Exception:
                         pass
-
-                    # Add import from utils
                     src = add_import(src, canonical_name)
                     modified_sources[fname] = src
 
-                # Also remove canonical from its original file (it moves to utils.py)
                 try:
                     src = modified_sources[canonical_file]
                     tree = ast.parse(src)
@@ -721,25 +827,37 @@ with tab_merge:
 
                 progress.progress((i + 1) / len(dupe_list), text=f"Merged {i+1}/{len(dupe_list)} clusters")
 
-            progress.progress(1.0, text="Building zip...")
+            progress.progress(1.0, text="Building zip and report...")
             status.empty()
 
-            # Build utils.py
             utils_src = '"""utils.py — Canonical functions extracted by SIR Engine merge."""\n\n'
             for fname, fsrc in utils_functions.items():
                 utils_src += fsrc + "\n\n"
 
-            # Build zip
+            # Build HTML report
+            report_html = build_merge_report(
+                file_sources, modified_sources, dupes_data, canonical_names_used, utils_functions
+            )
+
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 for fname, src in modified_sources.items():
                     zf.writestr(fname, src)
                 zf.writestr("utils.py", utils_src)
-
+                zf.writestr("sir_merge_report.html", report_html)
             zip_buffer.seek(0)
 
-            total_removed = sum(len(occs) for occs in dupes_data.values())
-            st.success(f"✅ Merged! Removed **{total_removed}** duplicate function(s), moved **{len(utils_functions)}** canonical function(s) to `utils.py`.")
+            total_removed = sum(len(occs) - 1 for occs in dupes_data.values())
+            orig_lines = sum(count_lines(s) for s in file_sources.values())
+            new_lines = sum(count_lines(s) for s in modified_sources.values())
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Files processed", len(file_sources))
+            c2.metric("Duplicates removed", total_removed)
+            c3.metric("Functions in utils.py", len(utils_functions))
+            c4.metric("Lines saved", orig_lines - new_lines)
+
+            st.success(f"✅ Merged! A full HTML report is included in the zip as `sir_merge_report.html`.")
             st.download_button(
                 "📥 Download merged codebase (.zip)",
                 data=zip_buffer,
@@ -770,12 +888,12 @@ Two functions that do the same thing will always produce the **same structural h
 
 | Tab | What it does |
 |-----|-------------|
-| **Scan** | Upload `.py` files → find structurally duplicate functions |
-| **Pack** | Upload `.py` files → compress into a `bundle.json` |
-| **Unpack** | Upload `bundle.json` → restore all functions as `.py` files |
+| **Scan** | Upload `.py` files → find structurally duplicate functions with syntax highlighting |
+| **Pack** | Upload `.py` files → compress into a `bundle.json` with size stats |
+| **Unpack** | Upload `bundle.json` → restore full files or individual functions |
 | **Verify** | Upload `bundle.json` + restored files → confirm hashes match |
 | **Diff** | Upload two sets of files → compare their logical structures |
-| **Merge** | Upload `.py` files → remove duplicates and consolidate into `utils.py` |
+| **Merge** | Upload `.py` files → remove duplicates, get HTML report + clean zip |
 
 ---
 
