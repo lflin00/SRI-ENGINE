@@ -99,16 +99,21 @@ with tab_scan:
         else:
             groups: Dict[str, List[Occur]] = defaultdict(list)
             total_funcs = 0
-            with st.spinner(f"Scanning {len(uploaded)} file(s)..."):
-                for f in uploaded:
-                    src = f.read().decode("utf-8", errors="replace")
-                    for qualname, lineno, code in extract_functions(src, f.name, include_methods):
-                        total_funcs += 1
-                        try:
-                            h = hash_source(code, mode="semantic")
-                            groups[h].append(Occur(file=f.name, qualname=qualname, lineno=lineno, semantic_hash=h))
-                        except Exception:
-                            pass
+            progress = st.progress(0, text="Starting scan...")
+            status = st.empty()
+            for i, f in enumerate(uploaded):
+                status.text(f"Scanning {f.name}...")
+                src = f.read().decode("utf-8", errors="replace")
+                for qualname, lineno, code in extract_functions(src, f.name, include_methods):
+                    total_funcs += 1
+                    try:
+                        h = hash_source(code, mode="semantic")
+                        groups[h].append(Occur(file=f.name, qualname=qualname, lineno=lineno, semantic_hash=h))
+                    except Exception:
+                        pass
+                progress.progress((i + 1) / len(uploaded), text=f"Scanned {i+1}/{len(uploaded)} files")
+            progress.progress(1.0, text="Scan complete!")
+            status.empty()
 
             dupes = {h: occ for h, occ in groups.items() if len(occ) >= int(min_cluster)}
 
@@ -161,28 +166,32 @@ with tab_pack:
             namemaps: Dict[str, Any] = {}
             total_funcs = 0
             errors = 0
-
-            with st.spinner(f"Packing {len(pack_uploaded)} file(s)..."):
-                for f in pack_uploaded:
-                    src = f.read().decode("utf-8", errors="replace")
-                    funcs = extract_functions(src, f.name, pack_methods)
-                    total_funcs += len(funcs)
-                    for qualname, lineno, code in funcs:
-                        try:
-                            sir = encode(code, mode="semantic")
-                            root_id = sir["root"]
-                            for nid, nd in sir["nodes"].items():
-                                global_nodes[nid] = nd
-                            roots.append({
-                                "root": root_id,
-                                "file": f.name,
-                                "qualname": qualname,
-                                "lineno": lineno,
-                                "sir_sha256": sir.get("sir_sha256"),
-                            })
-                            namemaps[root_id] = sir.get("name_map", {})
-                        except Exception:
-                            errors += 1
+            progress = st.progress(0, text="Starting pack...")
+            status = st.empty()
+            for i, f in enumerate(pack_uploaded):
+                status.text(f"Encoding {f.name}...")
+                src = f.read().decode("utf-8", errors="replace")
+                funcs = extract_functions(src, f.name, pack_methods)
+                total_funcs += len(funcs)
+                for qualname, lineno, code in funcs:
+                    try:
+                        sir = encode(code, mode="semantic")
+                        root_id = sir["root"]
+                        for nid, nd in sir["nodes"].items():
+                            global_nodes[nid] = nd
+                        roots.append({
+                            "root": root_id,
+                            "file": f.name,
+                            "qualname": qualname,
+                            "lineno": lineno,
+                            "sir_sha256": sir.get("sir_sha256"),
+                        })
+                        namemaps[root_id] = sir.get("name_map", {})
+                    except Exception:
+                        errors += 1
+                progress.progress((i + 1) / len(pack_uploaded), text=f"Packed {i+1}/{len(pack_uploaded)} files")
+            progress.progress(1.0, text="Pack complete!")
+            status.empty()
 
             meta = {
                 "format": "SIR-PACK",
@@ -218,8 +227,14 @@ with tab_pack:
 # ─────────────────────────────────────────────
 
 with tab_unpack:
-    st.subheader("Unpack: restore Python functions from a SIR bundle")
-    st.write("Upload a `bundle.json` produced by Pack. SIR will reconstruct all the original Python functions and let you download them as a `.zip`.")
+    st.subheader("Unpack: restore files from a SIR bundle")
+
+    unpack_mode = st.radio(
+        "Restore mode",
+        ["🔧 Full file restore (fix duplicates, get original .py files back)",
+         "🔬 Individual functions (one .py per function)"],
+        key="unpack_mode"
+    )
 
     bundle_file = st.file_uploader("Upload bundle.json", type=["json"], key="unpack_upload")
     rehydrate = st.checkbox("Restore original variable names (rehydrate)", value=True)
@@ -228,23 +243,137 @@ with tab_unpack:
         if not bundle_file:
             st.warning("Please upload a bundle.json file.")
         else:
-            with st.spinner("Unpacking..."):
-                try:
-                    bundle = json.loads(bundle_file.read().decode("utf-8"))
-                    nodes = bundle["nodes"]
-                    roots = bundle["roots"]
-                    namemaps = bundle.get("namemaps", {})
-                    meta = bundle.get("meta", {})
+            try:
+                bundle = json.loads(bundle_file.read().decode("utf-8"))
+                nodes = bundle["nodes"]
+                roots = bundle["roots"]
+                namemaps = bundle.get("namemaps", {})
+                meta = bundle.get("meta", {})
 
-                    st.write("**Pack info:**", meta)
+                st.write("**Pack info:**", meta)
 
-                    # Build zip in memory
+                # ── MODE 1: Full file restore ──
+                if "Full file restore" in unpack_mode:
+                    st.info("Restoring full files with duplicates removed and calls updated...")
+
+                    # Group roots by original file
+                    by_file: Dict[str, List[Dict]] = defaultdict(list)
+                    for r in roots:
+                        by_file[r["file"]].append(r)
+
+                    # Find duplicate structures (same sir_sha256, different qualnames)
+                    hash_to_roots: Dict[str, List[Dict]] = defaultdict(list)
+                    for r in roots:
+                        if r.get("sir_sha256"):
+                            hash_to_roots[r["sir_sha256"]].append(r)
+                    dupes = {h: rs for h, rs in hash_to_roots.items() if len(rs) >= 2}
+
+                    # Pick canonical name for each dupe cluster (first occurrence wins)
+                    canonical_map: Dict[str, str] = {}  # qualname -> canonical_qualname
+                    canonical_funcs: Dict[str, str] = {}  # canonical_qualname -> reconstructed source
+                    for h, rs in dupes.items():
+                        canonical = rs[0]["qualname"]
+                        for r in rs:
+                            canonical_map[r["qualname"]] = canonical
+                        # Reconstruct canonical function source
+                        root_id = rs[0]["root"]
+                        nm = namemaps.get(root_id, {}) if rehydrate else {}
+                        try:
+                            code = decode_sir({"nodes": nodes, "root": root_id, "name_map": nm}, rehydrate=rehydrate)
+                            canonical_funcs[canonical] = code
+                        except Exception:
+                            pass
+
+                    # Reconstruct each file
+                    progress = st.progress(0, text="Starting restore...")
+                    status = st.empty()
+                    file_list = list(by_file.items())
+                    reconstructed: Dict[str, str] = {}
+
+                    for i, (fname, file_roots) in enumerate(file_list):
+                        status.text(f"Restoring {fname}...")
+                        lines = []
+
+                        # Add utils import if needed
+                        needs_import = [r["qualname"] for r in file_roots
+                                        if r["qualname"] in canonical_map
+                                        and canonical_map[r["qualname"]] != r["qualname"]]
+                        if needs_import or any(r["qualname"] in canonical_funcs for r in file_roots):
+                            all_canonicals = set()
+                            for r in file_roots:
+                                q = r["qualname"]
+                                if q in canonical_map:
+                                    all_canonicals.add(canonical_map[q])
+                                elif q in canonical_funcs:
+                                    all_canonicals.add(q)
+                            if all_canonicals:
+                                lines.append(f"from utils import {', '.join(sorted(all_canonicals))}")
+                                lines.append("")
+
+                        # Add non-duplicate functions (reconstruct from nodes)
+                        for r in sorted(file_roots, key=lambda x: x.get("lineno", 0)):
+                            qualname = r["qualname"]
+                            # Skip duplicates — they move to utils.py
+                            if qualname in canonical_map and canonical_map[qualname] != qualname:
+                                continue
+                            # Skip canonicals too — they move to utils.py
+                            if qualname in canonical_funcs:
+                                continue
+                            # Reconstruct this function
+                            root_id = r["root"]
+                            nm = namemaps.get(root_id, {}) if rehydrate else {}
+                            try:
+                                code = decode_sir({"nodes": nodes, "root": root_id, "name_map": nm}, rehydrate=rehydrate)
+                                lines.append(code)
+                                lines.append("")
+                            except Exception:
+                                pass
+
+                        reconstructed[fname] = "\n".join(lines)
+                        progress.progress((i + 1) / len(file_list), text=f"Restored {i+1}/{len(file_list)} files")
+
+                    progress.progress(1.0, text="Building utils.py...")
+
+                    # Build utils.py
+                    utils_lines = ['"""utils.py — Canonical functions deduplicated by SIR Engine."""', ""]
+                    for cname, csrc in canonical_funcs.items():
+                        utils_lines.append(csrc)
+                        utils_lines.append("")
+                    reconstructed["utils.py"] = "\n".join(utils_lines)
+
+                    progress.progress(1.0, text="Creating zip...")
+                    status.empty()
+
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for fname, src in reconstructed.items():
+                            zf.writestr(fname, src)
+                    zip_buffer.seek(0)
+
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Files restored", len(reconstructed) - 1)
+                    c2.metric("Duplicate clusters removed", len(dupes))
+                    c3.metric("Functions in utils.py", len(canonical_funcs))
+
+                    st.success("✅ Full restore complete! Duplicates removed, utils.py created.")
+                    st.download_button(
+                        "📥 Download restored codebase (.zip)",
+                        data=zip_buffer,
+                        file_name="restored_codebase.zip",
+                        mime="application/zip",
+                    )
+
+                # ── MODE 2: Individual functions ──
+                else:
+                    progress = st.progress(0, text="Starting unpack...")
+                    status = st.empty()
                     zip_buffer = io.BytesIO()
                     restored = []
                     errors = 0
 
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                         for i, r in enumerate(roots):
+                            status.text(f"Restoring function {i+1}/{len(roots)}: {r['qualname']}...")
                             root_id = r["root"]
                             nm = namemaps.get(root_id, {}) if rehydrate else {}
                             try:
@@ -252,9 +381,12 @@ with tab_unpack:
                                 fname = occurrence_filename(r, i)
                                 zf.writestr(fname, code + "\n")
                                 restored.append({"file": fname, "qualname": r["qualname"], "original_file": r["file"]})
-                            except Exception as e:
+                            except Exception:
                                 errors += 1
+                            progress.progress((i + 1) / len(roots), text=f"Restored {i+1}/{len(roots)} functions")
 
+                    progress.progress(1.0, text="Done!")
+                    status.empty()
                     zip_buffer.seek(0)
 
                     c1, c2 = st.columns(2)
@@ -262,8 +394,6 @@ with tab_unpack:
                     c2.metric("Errors", errors)
 
                     st.success(f"✅ Restored {len(restored)} function(s)!")
-
-                    # Show preview
                     with st.expander("Preview restored functions", expanded=False):
                         st.dataframe(restored, use_container_width=True)
 
@@ -274,8 +404,8 @@ with tab_unpack:
                         mime="application/zip",
                     )
 
-                except Exception as e:
-                    st.error(f"Failed to unpack: {e}")
+            except Exception as e:
+                st.error(f"Failed to unpack: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -481,15 +611,17 @@ with tab_merge:
         if not merge_uploaded:
             st.warning("Please upload at least one .py file.")
         else:
-            # Read all files into memory
             file_sources: Dict[str, str] = {}
             for f in merge_uploaded:
                 file_sources[f.name] = f.read().decode("utf-8", errors="replace")
 
-            # Scan for duplicates
             groups: Dict[str, List[Occur]] = defaultdict(list)
             total_funcs = 0
-            for fname, src in file_sources.items():
+            progress = st.progress(0, text="Scanning for duplicates...")
+            status = st.empty()
+            file_list = list(file_sources.items())
+            for i, (fname, src) in enumerate(file_list):
+                status.text(f"Scanning {fname}...")
                 for qualname, lineno, code in extract_functions(src, fname, merge_methods):
                     total_funcs += 1
                     try:
@@ -497,6 +629,9 @@ with tab_merge:
                         groups[h].append(Occur(file=fname, qualname=qualname, lineno=lineno, semantic_hash=h))
                     except Exception:
                         pass
+                progress.progress((i + 1) / len(file_list), text=f"Scanned {i+1}/{len(file_list)} files")
+            progress.progress(1.0, text="Scan complete!")
+            status.empty()
 
             dupes = {h: occ for h, occ in groups.items() if len(occ) >= 2}
 
@@ -533,12 +668,15 @@ with tab_merge:
         st.divider()
 
         if st.button("🔀 Apply merge and download", type="primary"):
-            # Build modified sources
             modified_sources: Dict[str, str] = {k: v for k, v in file_sources.items()}
-            utils_functions: Dict[str, str] = {}  # canonical_name -> source
+            utils_functions: Dict[str, str] = {}
+            progress = st.progress(0, text="Applying merge...")
+            status = st.empty()
+            dupe_list = list(dupes_data.items())
 
-            for h, occs in dupes_data.items():
+            for i, (h, occs) in enumerate(dupe_list):
                 canonical_name = st.session_state.get(f"canon_{h}", occs[0]["qualname"])
+                status.text(f"Merging cluster {i+1}/{len(dupe_list)}: keeping '{canonical_name}'...")
 
                 # Find the file containing the canonical function
                 canonical_occ = next((o for o in occs if o["qualname"] == canonical_name), occs[0])
@@ -580,6 +718,11 @@ with tab_merge:
                     modified_sources[canonical_file] = ast.unparse(tree)
                 except Exception:
                     pass
+
+                progress.progress((i + 1) / len(dupe_list), text=f"Merged {i+1}/{len(dupe_list)} clusters")
+
+            progress.progress(1.0, text="Building zip...")
+            status.empty()
 
             # Build utils.py
             utils_src = '"""utils.py — Canonical functions extracted by SIR Engine merge."""\n\n'
