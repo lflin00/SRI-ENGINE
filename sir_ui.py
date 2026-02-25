@@ -406,12 +406,15 @@ with tab_pack:
             deduped = total_roots - unique_roots
             size_reduction = 100 * (1 - bundle_bytes / max(total_orig_bytes, 1))
 
+            orig_kb = total_orig_bytes / 1024
+            bundle_kb = bundle_bytes / 1024
+
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Files packed", meta["files_scanned"])
             c2.metric("Functions", meta["total_functions"])
             c3.metric("Unique nodes", meta["unique_nodes"])
             c4.metric("Duplicate structures removed", deduped)
-            c5.metric("Size vs original", f"{size_reduction:.1f}% smaller")
+            c5.metric("Bundle size", f"{bundle_kb:.1f} KB", delta=f"{bundle_kb - orig_kb:.1f} KB vs source")
 
             if errors:
                 st.warning(f"{errors} function(s) failed to encode and were skipped.")
@@ -749,9 +752,14 @@ with tab_merge:
             status.empty()
 
             dupes = {h: occ for h, occ in groups.items() if len(occ) >= 2}
+            merge_func_map = {}
+            for fname, src in file_sources.items():
+                for qualname, lineno, code in extract_functions(src, fname, merge_methods):
+                    merge_func_map[f"{fname}::{qualname}"] = code
             st.session_state["merge_file_sources"] = file_sources
             st.session_state["merge_dupes"] = {h: [vars(o) for o in occ] for h, occ in dupes.items()}
             st.session_state["merge_total"] = total_funcs
+            st.session_state["merge_func_map"] = merge_func_map
 
     if "merge_dupes" in st.session_state and st.session_state["merge_dupes"]:
         dupes_data = st.session_state["merge_dupes"]
@@ -771,9 +779,9 @@ with tab_merge:
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown(f"**{len(occs) - 1}** duplicate(s) will be removed")
                 # Show syntax highlighted code for each occurrence
+                merge_func_map = st.session_state.get("merge_func_map", {})
                 for o in occs:
-                    src = file_sources.get(o["file"], "")
-                    code = get_function_source(src, o["qualname"])
+                    code = merge_func_map.get(f"{o['file']}::{o['qualname']}", "")
                     if code:
                         st.markdown(f"**`{o['qualname']}`** in `{o['file']}` (line {o['lineno']})")
                         st.code(code, language="python")
