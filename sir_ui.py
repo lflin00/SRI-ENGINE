@@ -916,4 +916,16 @@ Two functions that do the same thing will always produce the **same structural h
 
 ### Built by
 Lucas Flinders — [GitHub](https://github.com/lflin00/SRI-ENGINE)
+
+---
+
+### VS Code Extension
+
+Install the SIR Engine extension to scan for duplicates directly in your editor — auto-scans on every save.
     """)
+
+st.link_button(
+    "📥 Download VS Code Extension (.vsix)",
+    "https://github.com/lflin00/SRI-ENGINE/raw/main/sir-engine-0.0.1.vsix"
+)
+st.caption("After downloading: open VS Code → Cmd+Shift+P → 'Install from VSIX' → select the file.")
