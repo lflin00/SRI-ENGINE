@@ -1,0 +1,10 @@
+{
+  "files_scanned": 2,
+  "format": "SIR-PACK",
+  "include_methods": false,
+  "source_path": "/Users/lucas/Downloads/Jarvis/SIR/SIR_MAIN/demo_scan",
+  "total_functions": 4,
+  "unique_nodes": 35,
+  "unique_roots": 3,
+  "version": "0.2-ui"
+}

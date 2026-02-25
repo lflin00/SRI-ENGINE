@@ -1,0 +1,12 @@
+{
+  "/Users/lucas/Downloads/Jarvis/SIR/SIR_MAIN/demo_scan/a.py": {
+    "calculate_total:1": "f804148a1b6f9e80004db4cf6a69fc6bc3139d9703100acd97d4324ecf855824",
+    "file_sha256": "5b5a46351d14f241036a8e8221754077ca430ac79d1dc95f2c07d16f184e05fc",
+    "hello:4": "6906963aaa34b73202213c6d052815c4b103ad147fcfdb75bbbd0ffc41a6c000"
+  },
+  "/Users/lucas/Downloads/Jarvis/SIR/SIR_MAIN/demo_scan/b.py": {
+    "calc_total:1": "f804148a1b6f9e80004db4cf6a69fc6bc3139d9703100acd97d4324ecf855824",
+    "file_sha256": "2f498544acd54dff08cfd5612fb755e81520f98e751cb43e8a7d644c93ba3fc2",
+    "hello:4": "6906963aaa34b73202213c6d052815c4b103ad147fcfdb75bbbd0ffc41a6c000"
+  }
+}

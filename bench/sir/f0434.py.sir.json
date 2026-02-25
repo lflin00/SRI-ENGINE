@@ -1,0 +1,172 @@
+{
+  "format": "SIR-1",
+  "mode": "semantic",
+  "name_map": {
+    "functions": [
+      {
+        "canon_func": "f0",
+        "canon_to_orig": {
+          "v0": "iexdvfie",
+          "v1": "jdqsynmt"
+        },
+        "orig_func": "wpkctzsi"
+      }
+    ]
+  },
+  "nodes": {
+    "002d701d3cb01c732599aaae111d14dd146e517da1c5cc1281dbf84f249fcc7a": {
+      "f": {},
+      "t": "None"
+    },
+    "06e304e2842a3034b2221c4027a3b169fc4f03740c8f9d183b079c224df5c239": {
+      "f": {
+        "value": "06e81f500bdb73660e75ba5c7e011949a96c3d79286d2ecf196f68727dbfed14"
+      },
+      "t": "Return"
+    },
+    "06e81f500bdb73660e75ba5c7e011949a96c3d79286d2ecf196f68727dbfed14": {
+      "f": {
+        "left": "33e3d4bdd8e7582ada98c1b2f1bb9ef26afb7594ecfc34d313c22409e20956a2",
+        "op": "Mult",
+        "right": "135862d938b1f3450f7c64af5c6dbb3c63bdf13344a91b28e300c4e5f55f7203"
+      },
+      "t": "BinOp"
+    },
+    "135862d938b1f3450f7c64af5c6dbb3c63bdf13344a91b28e300c4e5f55f7203": {
+      "f": {
+        "left": "64beeeaac9f104d2bbaa513534037a2ca9912482f752e888e6fc7a9ee7c8fdff",
+        "op": "Add",
+        "right": "f0eedc8cbdb1bd2b4a4307c4530d1535386650f346c8faea6231cfd830e2ff4d"
+      },
+      "t": "BinOp"
+    },
+    "1a6bcdb002fd142c245eda84391b3942651b71ad1501d858eabfbb63d379e4dc": {
+      "f": {
+        "annotation": "002d701d3cb01c732599aaae111d14dd146e517da1c5cc1281dbf84f249fcc7a",
+        "arg": "2663aca804c53af239f2ce7a7f25e1b01dad6e89c411a00281068b7d3be5ecc8"
+      },
+      "t": "arg"
+    },
+    "2663aca804c53af239f2ce7a7f25e1b01dad6e89c411a00281068b7d3be5ecc8": {
+      "f": {
+        "k": "str",
+        "v": "v1"
+      },
+      "t": "Lit"
+    },
+    "33e3d4bdd8e7582ada98c1b2f1bb9ef26afb7594ecfc34d313c22409e20956a2": {
+      "f": {
+        "ctx": "Load",
+        "id": "6bbe6397cd8b7afb44d5f0f37a91781ab144448cb3bd333733c9e7a845b1c4a2"
+      },
+      "t": "Name"
+    },
+    "3f87c8bcd08e82ed1f2d3b46ed0c962c5423e0c83f214ae6a9b483e6c159d39b": {
+      "f": {
+        "items": [
+          "06e304e2842a3034b2221c4027a3b169fc4f03740c8f9d183b079c224df5c239"
+        ]
+      },
+      "t": "List"
+    },
+    "50960deb973d60efeea64f711f26ef6815aab147f48560002a01c72dcc7b79b1": {
+      "f": {
+        "items": [
+          "5d71a53a967ed7cd2e8447e663c670788c8ac6c67dfc916cd7a8b9cea3450639",
+          "1a6bcdb002fd142c245eda84391b3942651b71ad1501d858eabfbb63d379e4dc"
+        ]
+      },
+      "t": "List"
+    },
+    "5d71a53a967ed7cd2e8447e663c670788c8ac6c67dfc916cd7a8b9cea3450639": {
+      "f": {
+        "annotation": "002d701d3cb01c732599aaae111d14dd146e517da1c5cc1281dbf84f249fcc7a",
+        "arg": "6bbe6397cd8b7afb44d5f0f37a91781ab144448cb3bd333733c9e7a845b1c4a2"
+      },
+      "t": "arg"
+    },
+    "605def451a5bdc96a00283b74d055a72d85b2400afaf5b02f133f92c291f1188": {
+      "f": {
+        "k": "int",
+        "v": 1
+      },
+      "t": "Lit"
+    },
+    "64beeeaac9f104d2bbaa513534037a2ca9912482f752e888e6fc7a9ee7c8fdff": {
+      "f": {
+        "kind": "002d701d3cb01c732599aaae111d14dd146e517da1c5cc1281dbf84f249fcc7a",
+        "value": "605def451a5bdc96a00283b74d055a72d85b2400afaf5b02f133f92c291f1188"
+      },
+      "t": "Constant"
+    },
+    "6bbe6397cd8b7afb44d5f0f37a91781ab144448cb3bd333733c9e7a845b1c4a2": {
+      "f": {
+        "k": "str",
+        "v": "v0"
+      },
+      "t": "Lit"
+    },
+    "72c0178cec690a3eb932084baa41ec33c5fb945596546125ff80eeb2bd9834fd": {
+      "f": {
+        "args": "dcb041b76040753899c55a4565b02aa8c7595c6db8e76331d6ab8c37a8a8db3f",
+        "body": "3f87c8bcd08e82ed1f2d3b46ed0c962c5423e0c83f214ae6a9b483e6c159d39b",
+        "decorator_list": "ba34d14a70a721ba8979ee06494ed0f390edd8ca872c6b675e0f237bd12e637d",
+        "name": "b999b34e9ef843def99d3a7b3a192fe56f3572c555012f9ed023019277b68e9e",
+        "returns": "002d701d3cb01c732599aaae111d14dd146e517da1c5cc1281dbf84f249fcc7a",
+        "type_params": "ba34d14a70a721ba8979ee06494ed0f390edd8ca872c6b675e0f237bd12e637d"
+      },
+      "t": "FunctionDef"
+    },
+    "b999b34e9ef843def99d3a7b3a192fe56f3572c555012f9ed023019277b68e9e": {
+      "f": {
+        "k": "str",
+        "v": "f0"
+      },
+      "t": "Lit"
+    },
+    "ba34d14a70a721ba8979ee06494ed0f390edd8ca872c6b675e0f237bd12e637d": {
+      "f": {
+        "items": []
+      },
+      "t": "List"
+    },
+    "d54e2e1f61e73d2c8115049fff14cf447a9d2f413963a223d681530dbdf6d2e9": {
+      "f": {
+        "body": "dde884e1b974af014032dfef902daedb34c13dbe3f0317984988d6b01bc3c16a",
+        "type_ignores": "ba34d14a70a721ba8979ee06494ed0f390edd8ca872c6b675e0f237bd12e637d"
+      },
+      "t": "Module"
+    },
+    "dcb041b76040753899c55a4565b02aa8c7595c6db8e76331d6ab8c37a8a8db3f": {
+      "f": {
+        "args": "50960deb973d60efeea64f711f26ef6815aab147f48560002a01c72dcc7b79b1",
+        "defaults": "ba34d14a70a721ba8979ee06494ed0f390edd8ca872c6b675e0f237bd12e637d",
+        "kw_defaults": "ba34d14a70a721ba8979ee06494ed0f390edd8ca872c6b675e0f237bd12e637d",
+        "kwarg": "002d701d3cb01c732599aaae111d14dd146e517da1c5cc1281dbf84f249fcc7a",
+        "kwonlyargs": "ba34d14a70a721ba8979ee06494ed0f390edd8ca872c6b675e0f237bd12e637d",
+        "posonlyargs": "ba34d14a70a721ba8979ee06494ed0f390edd8ca872c6b675e0f237bd12e637d",
+        "vararg": "002d701d3cb01c732599aaae111d14dd146e517da1c5cc1281dbf84f249fcc7a"
+      },
+      "t": "arguments"
+    },
+    "dde884e1b974af014032dfef902daedb34c13dbe3f0317984988d6b01bc3c16a": {
+      "f": {
+        "items": [
+          "72c0178cec690a3eb932084baa41ec33c5fb945596546125ff80eeb2bd9834fd"
+        ]
+      },
+      "t": "List"
+    },
+    "f0eedc8cbdb1bd2b4a4307c4530d1535386650f346c8faea6231cfd830e2ff4d": {
+      "f": {
+        "ctx": "Load",
+        "id": "2663aca804c53af239f2ce7a7f25e1b01dad6e89c411a00281068b7d3be5ecc8"
+      },
+      "t": "Name"
+    }
+  },
+  "root": "d54e2e1f61e73d2c8115049fff14cf447a9d2f413963a223d681530dbdf6d2e9",
+  "sir_sha256": "f804148a1b6f9e80004db4cf6a69fc6bc3139d9703100acd97d4324ecf855824",
+  "source_sha256": "a50cbb11fa1e02c0982629ccd36da560df9b2d63f8ed626eae774275e5deb22d",
+  "version": "0.2"
+}
