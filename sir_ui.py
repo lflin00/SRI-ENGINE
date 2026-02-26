@@ -245,8 +245,8 @@ st.set_page_config(page_title="SIR Engine", layout="wide", page_icon="🔍")
 st.title("🔍 SIR Engine")
 st.caption("Semantic duplicate detection, structural compression, and code diffing for Python.")
 
-tab_scan, tab_js, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
-    "Scan (Python)", "Scan (JavaScript)", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
+tab_scan, tab_js, tab_cross, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
+    "Scan (Python)", "Scan (JavaScript)", "Scan (Cross-Language)", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
 ])
 
 
@@ -346,12 +346,12 @@ with tab_scan:
 
 with tab_js:
     st.subheader("Scan: find structurally duplicate JavaScript functions")
-    st.write("Upload .js or .ts files — SIR finds functions that are logically identical even if named differently.")
+    st.write("Upload `.js` or `.ts` files — SIR finds functions that are logically identical even if named differently.")
 
-    import sys as _sys, os as _os
-    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
     try:
-        from sir_js import hash_js_source, extract_js_functions, tokenize as js_tokenize, canonicalize_js
+        from sir_js import hash_js_source, extract_js_functions
         js_available = True
     except ImportError:
         js_available = False
@@ -366,7 +366,9 @@ with tab_js:
             if not js_uploaded:
                 st.warning("Please upload at least one .js or .ts file.")
             else:
+                from collections import defaultdict
                 js_groups = defaultdict(list)
+                js_func_code = {}
                 total_js_funcs = 0
                 progress = st.progress(0, text="Starting JS scan...")
                 status = st.empty()
@@ -377,10 +379,12 @@ with tab_js:
                     funcs = extract_js_functions(src, f.name)
                     for name, lineno, params, body_src in funcs:
                         total_js_funcs += 1
-                        body_tokens = js_tokenize(body_src)
+                        from sir_js import tokenize, canonicalize_js
+                        body_tokens = tokenize(body_src)
                         sir = canonicalize_js(params, body_tokens)
                         h = sir["sir_sha256"]
                         js_groups[h].append({"file": f.name, "name": name, "lineno": lineno, "body": body_src})
+                        js_func_code[f"{f.name}::{name}"] = body_src
                     progress.progress((i + 1) / len(js_uploaded), text=f"Scanned {i+1}/{len(js_uploaded)} files")
 
                 progress.progress(1.0, text="Scan complete!")
@@ -392,19 +396,105 @@ with tab_js:
                 c1.metric("Files", len(js_uploaded))
                 c2.metric("Functions", total_js_funcs)
                 c3.metric("Unique structures", len(js_groups))
-                c4.metric(f"Duplicate clusters", len(js_dupes))
+                c4.metric(f"Duplicate clusters (≥{js_min_cluster})", len(js_dupes))
                 st.divider()
 
                 if not js_dupes:
-                    st.success("No duplicate JavaScript function structures found!")
+                    st.success("✅ No duplicate JavaScript function structures found!")
                 else:
-                    st.error(f"Found {len(js_dupes)} duplicate cluster(s)")
+                    st.error(f"⚠️ Found {len(js_dupes)} duplicate cluster(s)")
                     for h, occs in sorted(js_dupes.items(), key=lambda x: -len(x[1])):
-                        with st.expander(f"🔴 {len(occs)} duplicates — hash: {h[:16]}...", expanded=True):
-                            st.caption(f"Full hash: {h}")
+                        with st.expander(f"🔴 {len(occs)} duplicates — hash: `{h[:16]}...`", expanded=True):
+                            st.caption(f"Full hash: `{h}`")
                             for o in occs:
-                                st.markdown(f"**{o['name']}** in {o['file']} (line {o['lineno']})")
+                                st.markdown(f"**`{o['name']}`** in `{o['file']}` (line {o['lineno']})")
                                 st.code(o["body"], language="javascript")
+
+
+
+# ─────────────────────────────────────────────
+#  CROSS-LANGUAGE SCAN
+# ─────────────────────────────────────────────
+
+with tab_cross:
+    st.subheader("Cross-Language Scan: find duplicate logic across Python, JavaScript and TypeScript")
+    st.write("Upload any mix of `.py`, `.js`, `.ts`, `.jsx`, or `.tsx` files. SIR finds functions that are structurally identical across languages — a Python function and a JavaScript function that do the same thing will match.")
+
+    try:
+        from sir_universal import hash_file_universal
+        universal_available = True
+    except ImportError:
+        universal_available = False
+
+    if not universal_available:
+        st.error("sir_universal.py not found. Make sure it is in the same folder as sir_ui.py.")
+    else:
+        cross_uploaded = st.file_uploader(
+            "Upload Python, JavaScript, or TypeScript files",
+            type=["py", "js", "ts", "jsx", "tsx"],
+            accept_multiple_files=True,
+            key="cross_upload"
+        )
+        cross_min = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="cross_min")
+
+        if st.button("Run cross-language scan", type="primary"):
+            if not cross_uploaded:
+                st.warning("Please upload at least one file.")
+            else:
+                cross_groups = defaultdict(list)
+                total_cross_funcs = 0
+                progress = st.progress(0, text="Starting cross-language scan...")
+                status = st.empty()
+
+                for i, f in enumerate(cross_uploaded):
+                    status.text(f"Scanning {f.name}...")
+                    src = f.read().decode("utf-8", errors="replace")
+                    try:
+                        results = hash_file_universal(src, f.name)
+                        for name, lineno, h in results:
+                            total_cross_funcs += 1
+                            lang = "Python" if f.name.endswith(".py") else "TypeScript" if f.name.endswith((".ts", ".tsx")) else "JavaScript"
+                            cross_groups[h].append({
+                                "file": f.name,
+                                "name": name,
+                                "lineno": lineno,
+                                "lang": lang
+                            })
+                    except Exception as e:
+                        st.warning(f"Could not scan {f.name}: {e}")
+                    progress.progress((i + 1) / len(cross_uploaded), text=f"Scanned {i+1}/{len(cross_uploaded)} files")
+
+                progress.progress(1.0, text="Scan complete!")
+                status.empty()
+
+                cross_dupes = {h: v for h, v in cross_groups.items() if len(v) >= int(cross_min)}
+                cross_lang_dupes = {h: v for h, v in cross_dupes.items()
+                                    if len(set(o["lang"] for o in v)) > 1}
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Files", len(cross_uploaded))
+                c2.metric("Functions", total_cross_funcs)
+                c3.metric("Duplicate clusters", len(cross_dupes))
+                c4.metric("Cross-language matches", len(cross_lang_dupes))
+                st.divider()
+
+                if not cross_dupes:
+                    st.success("No duplicate function structures found!")
+                else:
+                    if cross_lang_dupes:
+                        st.error(f"Found {len(cross_lang_dupes)} cross-language duplicate(s) — same logic in multiple languages!")
+                    
+                    for h, occs in sorted(cross_dupes.items(), key=lambda x: -len(x[1])):
+                        langs = set(o["lang"] for o in occs)
+                        is_cross = len(langs) > 1
+                        icon = "🌐" if is_cross else "🔴"
+                        label = f"{icon} {len(occs)} duplicates across {', '.join(sorted(langs))} — hash: {h[:16]}..."
+                        with st.expander(label, expanded=is_cross):
+                            if is_cross:
+                                st.info("This logic exists in multiple languages — potential for code consolidation or API alignment.")
+                            for o in occs:
+                                lang_badge = {"Python": "🐍", "JavaScript": "🟨", "TypeScript": "🔷"}.get(o["lang"], "📄")
+                                st.markdown(f"{lang_badge} **{o['lang']}** — `{o['name']}` in `{o['file']}` (line {o['lineno']})")
 
 # ─────────────────────────────────────────────
 #  PACK
@@ -475,6 +565,7 @@ with tab_pack:
 
             orig_kb = total_orig_bytes / 1024
             bundle_kb = bundle_bytes / 1024
+            ratio = bundle_kb / max(orig_kb, 0.001)
 
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Files packed", meta["files_scanned"])
@@ -819,10 +910,13 @@ with tab_merge:
             status.empty()
 
             dupes = {h: occ for h, occ in groups.items() if len(occ) >= 2}
+
+            # Build func code map for syntax highlighting
             merge_func_map = {}
             for fname, src in file_sources.items():
                 for qualname, lineno, code in extract_functions(src, fname, merge_methods):
                     merge_func_map[f"{fname}::{qualname}"] = code
+
             st.session_state["merge_file_sources"] = file_sources
             st.session_state["merge_dupes"] = {h: [vars(o) for o in occ] for h, occ in dupes.items()}
             st.session_state["merge_total"] = total_funcs
@@ -848,7 +942,8 @@ with tab_merge:
                 # Show syntax highlighted code for each occurrence
                 merge_func_map = st.session_state.get("merge_func_map", {})
                 for o in occs:
-                    code = merge_func_map.get(f"{o['file']}::{o['qualname']}", "")
+                    src = file_sources.get(o["file"], "")
+                    code = get_function_source(src, o["qualname"]) or merge_func_map.get(f"{o['file']}::{o['qualname']}", "")
                     if code:
                         st.markdown(f"**`{o['qualname']}`** in `{o['file']}` (line {o['lineno']})")
                         st.code(code, language="python")
