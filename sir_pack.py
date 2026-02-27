@@ -152,6 +152,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             for nid, nd in sir["nodes"].items():
                 global_nodes[nid] = nd
 
+            occurrence_key = f"{meta.file}::{meta.qualname}::{meta.lineno}"
             roots.append({
                 "root": root_id,
                 "file": meta.file,
@@ -159,9 +160,16 @@ def cmd_pack(args: argparse.Namespace) -> int:
                 "lineno": meta.lineno,
                 "sir_sha256": sir.get("sir_sha256"),
                 "source_sha256": sha256_bytes(code.encode("utf-8")),
+                "occurrence_key": occurrence_key,
             })
 
-            namemaps[root_id] = sir["name_map"]
+            # Fix: key by occurrence identity not structural hash
+            # Two functions with same hash (duplicates) must each keep their own name map
+            occurrence_key = f"{meta.file}::{meta.qualname}::{meta.lineno}"
+            namemaps[occurrence_key] = {
+                "root_id": root_id,
+                "name_map": sir["name_map"]
+            }
 
     meta = {
         "format": "SIR-PACK",
