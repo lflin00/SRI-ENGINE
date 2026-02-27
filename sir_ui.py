@@ -245,8 +245,8 @@ st.set_page_config(page_title="SIR Engine", layout="wide", page_icon="🔍")
 st.title("🔍 SIR Engine")
 st.caption("Semantic duplicate detection, structural compression, and code diffing for Python.")
 
-tab_scan, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
-    "Scan", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
+tab_scan, tab_github, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
+    "Scan", "GitHub Scanner", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
 ])
 
 
@@ -272,6 +272,17 @@ with tab_scan:
             include_methods = st.checkbox("Include class methods", value=False)
         with col2:
             min_cluster = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1)
+        sir_ignore_input = st.text_area(
+            ".sir_ignore — function names to skip (one per line)",
+            placeholder="calculate_total\nadd_values\n# Use # for comments",
+            key="sir_ignore_py", height=80
+        )
+        ignored_funcs = set()
+        if sir_ignore_input.strip():
+            ignored_funcs = {l.strip() for l in sir_ignore_input.splitlines()
+                             if l.strip() and not l.strip().startswith("#")}
+        if ignored_funcs:
+            st.caption(f"Ignoring {len(ignored_funcs)} function(s): {', '.join(sorted(ignored_funcs))}")
 
         if st.button("Run scan", type="primary"):
             if not uploaded:
@@ -288,6 +299,10 @@ with tab_scan:
                     src = f.read().decode("utf-8", errors="replace")
                     scan_sources[f.name] = src
                     for qualname, lineno, code in extract_functions(src, f.name, include_methods):
+                        # Check sir_ignore
+                        short_name = qualname.split(".")[-1]
+                        if short_name in ignored_funcs or qualname in ignored_funcs:
+                            continue
                         total_funcs += 1
                         func_code_map[f"{f.name}::{qualname}"] = code
                         try:
@@ -533,6 +548,227 @@ with tab_scan:
                                     st.markdown(f"{badge} **{o['lang']}** — `{o['name']}` in `{o['file']}` (line {o['lineno']})")
 
 
+
+
+# ─────────────────────────────────────────────
+#  GITHUB SCANNER
+# ─────────────────────────────────────────────
+
+with tab_github:
+    st.subheader("GitHub Scanner: scan any public repository for duplicate functions")
+    st.write("Paste a public GitHub repo URL — SIR fetches the code and runs a full structural duplicate scan. No download needed.")
+
+    gh_url = st.text_input(
+        "GitHub repository URL",
+        placeholder="https://github.com/username/repository",
+        key="gh_url"
+    )
+    gh_lang = st.selectbox(
+        "Language to scan",
+        ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)", "All languages"],
+        key="gh_lang"
+    )
+    gh_min = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="gh_min")
+    gh_ignore = st.text_area(
+        "sir_ignore — paste function names to ignore (one per line)",
+        placeholder="calculate_total\nadd_values\n...",
+        key="gh_ignore",
+        height=80
+    )
+
+    if st.button("Scan GitHub repo", type="primary"):
+        if not gh_url.strip():
+            st.warning("Please enter a GitHub repository URL.")
+        else:
+            try:
+                import urllib.request as _urllib
+                import base64 as _base64
+
+                # Parse URL → owner/repo/branch
+                gh_clean = gh_url.strip().rstrip("/")
+                gh_clean = gh_clean.replace("https://github.com/", "").replace("http://github.com/", "")
+                parts = gh_clean.split("/")
+                if len(parts) < 2:
+                    st.error("Invalid GitHub URL. Format: https://github.com/username/repository")
+                    st.stop()
+                owner, repo = parts[0], parts[1]
+                branch = parts[3] if len(parts) > 3 and parts[2] == "tree" else "main"
+
+                # Parse ignore list
+                ignored_names = set()
+                if gh_ignore.strip():
+                    ignored_names = {line.strip() for line in gh_ignore.strip().splitlines() if line.strip()}
+
+                # Determine file extensions
+                if "Python" in gh_lang:
+                    target_exts = (".py",)
+                elif "JavaScript" in gh_lang:
+                    target_exts = (".js", ".jsx")
+                elif "TypeScript" in gh_lang:
+                    target_exts = (".ts", ".tsx")
+                else:
+                    target_exts = (".py", ".js", ".jsx", ".ts", ".tsx")
+
+                status = st.empty()
+                progress = st.progress(0, text="Fetching file tree from GitHub...")
+
+                # Fetch file tree
+                def gh_get(url):
+                    req = _urllib.Request(url, headers={"User-Agent": "SIR-Engine/1.0", "Accept": "application/vnd.github.v3+json"})
+                    resp = _urllib.urlopen(req, timeout=15)
+                    return json.loads(resp.read().decode("utf-8"))
+
+                # Try main then master
+                tree_data = None
+                for try_branch in [branch, "main", "master"]:
+                    try:
+                        tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{try_branch}?recursive=1"
+                        tree_data = gh_get(tree_url)
+                        branch = try_branch
+                        break
+                    except Exception:
+                        continue
+
+                if not tree_data:
+                    st.error(f"Could not fetch repo tree. Check the URL and make sure the repo is public.")
+                    st.stop()
+
+                # Filter to target files, skip node_modules etc
+                skip_dirs = {"node_modules", "__pycache__", ".git", "dist", "build", "vendor", ".venv", "venv"}
+                all_files = [
+                    f for f in tree_data.get("tree", [])
+                    if f["type"] == "blob"
+                    and any(f["path"].endswith(ext) for ext in target_exts)
+                    and not any(part in skip_dirs for part in f["path"].split("/"))
+                    and f.get("size", 0) < 500000  # skip files > 500KB
+                ]
+
+                if not all_files:
+                    st.warning(f"No {gh_lang} files found in this repository.")
+                    st.stop()
+
+                st.info(f"Found {len(all_files)} file(s) in `{owner}/{repo}` — scanning...")
+
+                # Fetch and scan each file
+                from collections import defaultdict as _dd
+                gh_groups = _dd(list)
+                total_gh_funcs = 0
+                errors_gh = 0
+                scanned = 0
+
+                for i, file_info in enumerate(all_files):
+                    fpath = file_info["path"]
+                    status.text(f"Scanning {fpath}...")
+                    progress.progress((i + 1) / len(all_files), text=f"Scanned {i+1}/{len(all_files)} files")
+
+                    try:
+                        # Fetch file content via raw GitHub
+                        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{fpath}"
+                        req = _urllib.Request(raw_url, headers={"User-Agent": "SIR-Engine/1.0"})
+                        resp = _urllib.urlopen(req, timeout=10)
+                        src = resp.read().decode("utf-8", errors="replace")
+                        scanned += 1
+                    except Exception:
+                        errors_gh += 1
+                        continue
+
+                    try:
+                        if fpath.endswith(".py"):
+                            for qualname, lineno, code in extract_functions(src, fpath, False):
+                                if qualname.split(".")[-1] in ignored_names:
+                                    continue
+                                total_gh_funcs += 1
+                                try:
+                                    h = hash_source(code, mode="semantic")
+                                    gh_groups[h].append({
+                                        "file": fpath, "name": qualname,
+                                        "lineno": lineno, "lang": "Python", "code": code
+                                    })
+                                except Exception:
+                                    pass
+                        else:
+                            from sir_js import extract_js_functions, tokenize as _jt, canonicalize_js as _cj
+                            funcs = extract_js_functions(src, fpath)
+                            for name, lineno, params, body_src in funcs:
+                                if name in ignored_names:
+                                    continue
+                                total_gh_funcs += 1
+                                try:
+                                    body_tokens = _jt(body_src)
+                                    sir = _cj(params, body_tokens)
+                                    gh_groups[sir["sir_sha256"]].append({
+                                        "file": fpath, "name": name,
+                                        "lineno": lineno, "lang": "JS/TS", "code": body_src
+                                    })
+                                except Exception:
+                                    pass
+                    except Exception:
+                        errors_gh += 1
+
+                progress.progress(1.0, text="Scan complete!")
+                status.empty()
+
+                gh_dupes = {h: v for h, v in gh_groups.items() if len(v) >= int(gh_min)}
+                health = int(100 * len(gh_groups) / max(total_gh_funcs, 1))
+
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Files scanned", scanned)
+                c2.metric("Functions", total_gh_funcs)
+                c3.metric("Unique structures", len(gh_groups))
+                c4.metric(f"Duplicate clusters", len(gh_dupes))
+                c5.metric("Health score", f"{health}/100")
+
+                if ignored_names:
+                    st.caption(f"Ignored {len(ignored_names)} function name(s): {', '.join(sorted(ignored_names))}")
+                if errors_gh:
+                    st.caption(f"{errors_gh} file(s) could not be fetched or parsed.")
+
+                st.divider()
+
+                if not gh_dupes:
+                    st.success(f"✅ `{owner}/{repo}` has no structural duplicate functions!")
+                else:
+                    st.error(f"Found {len(gh_dupes)} duplicate cluster(s) in `{owner}/{repo}`")
+
+                    # Build report
+                    report_data = {
+                        "repo": f"{owner}/{repo}",
+                        "branch": branch,
+                        "health_score": health,
+                        "total_functions": total_gh_funcs,
+                        "duplicate_clusters": len(gh_dupes),
+                        "clusters": []
+                    }
+
+                    for h, occs in sorted(gh_dupes.items(), key=lambda x: -len(x[1])):
+                        langs = set(o["lang"] for o in occs)
+                        is_cross = len(langs) > 1
+                        icon = "🌐" if is_cross else "🔴"
+                        label = f"{icon} {len(occs)} duplicates — hash: `{h[:16]}...`"
+
+                        with st.expander(label, expanded=len(occs) >= 3):
+                            for o in occs:
+                                gh_file_url = f"https://github.com/{owner}/{repo}/blob/{branch}/{o['file']}#L{o['lineno']}"
+                                st.markdown(f"**`{o['name']}`** in [`{o['file']}`]({gh_file_url}) (line {o['lineno']})")
+                                lang_key = "python" if o["lang"] == "Python" else "javascript"
+                                st.code(o["code"][:800] + ("..." if len(o["code"]) > 800 else ""), language=lang_key)
+
+                        report_data["clusters"].append({
+                            "hash": h,
+                            "count": len(occs),
+                            "occurrences": [{"file": o["file"], "name": o["name"], "lineno": o["lineno"]} for o in occs]
+                        })
+
+                    st.download_button(
+                        "📥 Download scan report (JSON)",
+                        data=json.dumps(report_data, indent=2),
+                        file_name=f"sir_scan_{repo}.json",
+                        mime="application/json"
+                    )
+
+            except Exception as e:
+                st.error(f"GitHub scan failed: {e}")
+                st.caption("Make sure the repository is public and the URL is correct.")
 
 # ─────────────────────────────────────────────
 #  PACK
