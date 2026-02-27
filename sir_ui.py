@@ -1016,13 +1016,13 @@ with tab_github:
 with tab_pack:
     st.subheader("Pack: compress files into a SIR bundle")
 
-    pack_lang = st.selectbox("Language", ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)"], key="pack_lang")
+    pack_lang = st.selectbox("Language", ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)", "Any Language (AI-powered 🤖)"], key="pack_lang")
 
     if pack_lang == "Python (.py)":
         st.write("Upload `.py` files — SIR encodes each function into a structural node graph, deduplicates shared logic, and bundles everything into a single downloadable `bundle.json`.")
         pack_uploaded = st.file_uploader("Upload Python files to pack", type=["py"], accept_multiple_files=True, key="pack_upload")
         pack_methods = st.checkbox("Include class methods", value=False, key="pack_methods")
-    else:
+    elif pack_lang in ("JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)"):
         _exts = ["js", "jsx"] if "JavaScript" in pack_lang else ["ts", "tsx"]
         st.write(f"Upload `{'`, `'.join('.' + e for e in _exts)}` files — SIR tokenises each function, strips type annotations, deduplicates by structural hash, and bundles into `bundle_js.json`.")
         pack_uploaded_js = st.file_uploader(f"Upload {pack_lang} files", type=_exts, accept_multiple_files=True, key="pack_js_upload")
@@ -1076,6 +1076,104 @@ with tab_pack:
                     st.download_button("📥 Download bundle_js.json", data=bundle_json, file_name="bundle_js.json", mime="application/json")
                 except Exception as e:
                     st.error(f"Pack failed: {e}")
+
+    elif pack_lang == "Any Language (AI-powered 🤖)":
+        st.write("Upload code files in any language — SIR uses AI to translate each function to Python, then packs the canonical structures into a bundle.")
+        ai_pack_uploaded = st.file_uploader(
+            "Upload code files (any language)",
+            type=["c","cpp","cc","cxx","h","hpp","java","rs","go","rb","php","swift",
+                  "kt","scala","cs","lua","dart","hs","ex","ml","fs","jl","nim","zig","r","pl"],
+            accept_multiple_files=True, key="ai_pack_upload"
+        )
+        if st.button("Build AI pack", type="primary"):
+            if not ai_pack_uploaded:
+                st.warning("Please upload at least one file.")
+            else:
+                _ai_cfg = get_ai_config()
+                if _ai_cfg["backend"] == "none":
+                    st.error("No AI backend configured. Set up Ollama or add an Anthropic API key in the sidebar.")
+                else:
+                    try:
+                        from sir_ai_translate import detect_language, extract_raw_functions, translate_to_python
+                        from sir.core import hash_source as _hs
+                        ai_pack_store = {}
+                        ai_pack_roots = []
+                        ai_pack_namemaps = {}
+                        total_ai_pack = 0
+                        errors_ai_pack = 0
+                        progress = st.progress(0, text="Translating and packing...")
+                        status = st.empty()
+                        for i, f in enumerate(ai_pack_uploaded):
+                            status.text(f"Translating {f.name}...")
+                            src = f.read().decode("utf-8", errors="replace")
+                            lang = detect_language(f.name) or f.name.rsplit(".",1)[-1].upper()
+                            raw_funcs = extract_raw_functions(src, lang)
+                            for name, lineno, raw_src in raw_funcs:
+                                total_ai_pack += 1
+                                try:
+                                    py_src = translate_to_python(
+                                        raw_src, lang,
+                                        backend=_ai_cfg["backend"],
+                                        api_key=_ai_cfg["api_key"],
+                                        ollama_model=_ai_cfg["ollama_model"],
+                                        ollama_host=_ai_cfg["ollama_host"]
+                                    )
+                                    if py_src.strip():
+                                        h = _hs(py_src, mode="semantic")
+                                        occ_key = f"{f.name}::{name}::{lineno}"
+                                        if h not in ai_pack_store:
+                                            ai_pack_store[h] = {
+                                                "sir_sha256": h,
+                                                "lang": lang,
+                                                "original_src": raw_src,
+                                                "python_src": py_src,
+                                            }
+                                        ai_pack_namemaps[occ_key] = {
+                                            "sir_sha256": h,
+                                            "original_name": name,
+                                            "lang": lang,
+                                        }
+                                        ai_pack_roots.append({
+                                            "sir_sha256": h,
+                                            "file": f.name,
+                                            "name": name,
+                                            "lineno": lineno,
+                                            "lang": lang,
+                                            "occurrence_key": occ_key,
+                                        })
+                                except Exception:
+                                    errors_ai_pack += 1
+                            progress.progress((i+1)/len(ai_pack_uploaded), text=f"Packed {i+1}/{len(ai_pack_uploaded)} files")
+                        progress.progress(1.0, text="Done!")
+                        status.empty()
+
+                        unique = len(ai_pack_store)
+                        deduped = total_ai_pack - unique
+                        health = int(100 * unique / max(total_ai_pack, 1))
+                        bundle = {
+                            "format": "SIR-AI-PACK",
+                            "version": "0.1",
+                            "total_functions": total_ai_pack,
+                            "unique_structures": unique,
+                            "canonical_store": ai_pack_store,
+                            "roots": ai_pack_roots,
+                            "namemaps": ai_pack_namemaps,
+                        }
+                        bundle_json = json.dumps(bundle, indent=2)
+
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        c1.metric("Files", len(ai_pack_uploaded))
+                        c2.metric("Functions", total_ai_pack)
+                        c3.metric("Unique structures", unique)
+                        c4.metric("Duplicates removed", deduped)
+                        c5.metric("Health score", f"{health}/100")
+                        if errors_ai_pack:
+                            st.caption(f"{errors_ai_pack} function(s) could not be translated.")
+                        st.success("AI pack built!")
+                        st.download_button("📥 Download bundle_ai.json", data=bundle_json,
+                                          file_name="bundle_ai.json", mime="application/json")
+                    except Exception as e:
+                        st.error(f"AI pack failed: {e}")
 
     if pack_lang == "Python (.py)":
         pack_methods = locals().get("pack_methods", False)
@@ -1167,7 +1265,7 @@ with tab_pack:
 with tab_unpack:
     st.subheader("Unpack: restore files from a SIR bundle")
 
-    unpack_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript"], key="unpack_lang")
+    unpack_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript", "Any Language (AI bundle)"], key="unpack_lang")
 
     if unpack_lang == "JavaScript / TypeScript":
         st.write("Upload a `bundle_js.json` produced by the JS/TS Pack tab. SIR restores all files with original names rehydrated.")
@@ -1224,6 +1322,71 @@ with tab_unpack:
                                       file_name="restored_js.zip", mime="application/zip")
                 except Exception as e:
                     st.error(f"Unpack failed: {e}")
+    elif unpack_lang == "Any Language (AI bundle)":
+        st.write("Upload a `bundle_ai.json` produced by the AI Pack tab. SIR restores the original source files with function listings by language.")
+        unpack_ai_bundle = st.file_uploader("Upload bundle_ai.json", type=["json"], key="unpack_ai_bundle")
+
+        if st.button("Unpack AI bundle", type="primary"):
+            if not unpack_ai_bundle:
+                st.warning("Please upload a bundle_ai.json.")
+            else:
+                try:
+                    bundle = json.loads(unpack_ai_bundle.read().decode("utf-8"))
+                    roots = bundle.get("roots", [])
+                    namemaps = bundle.get("namemaps", {})
+                    canonical_store = bundle.get("canonical_store", {})
+
+                    by_file = defaultdict(list)
+                    for r in roots:
+                        by_file[r["file"]].append(r)
+
+                    zip_buffer = io.BytesIO()
+                    seen_hashes = set()
+                    restored_files = 0
+
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for fname, occs in by_file.items():
+                            lines = [f"// Restored by SIR Engine (AI pipeline)\n// Original file: {fname}\n\n"]
+                            for occ in sorted(occs, key=lambda x: x["lineno"]):
+                                h = occ["sir_sha256"]
+                                canonical = canonical_store.get(h, {})
+                                orig_src = canonical.get("original_src", "")
+                                py_src = canonical.get("python_src", "")
+                                lang = occ.get("lang", "unknown")
+                                if h not in seen_hashes:
+                                    lines.append(f"// [{lang}] {occ['name']} (line {occ['lineno']})\n")
+                                    lines.append(orig_src + "\n\n")
+                                    seen_hashes.add(h)
+                                else:
+                                    lines.append(f"// DUPLICATE skipped: {occ['name']} [{lang}]\n\n")
+                            zf.writestr(fname + ".restored.txt", "".join(lines))
+
+                            # Also write translated Python
+                            py_lines = [f"# Python translation by SIR Engine\n# Original: {fname}\n\n"]
+                            py_seen = set()
+                            for occ in sorted(occs, key=lambda x: x["lineno"]):
+                                h = occ["sir_sha256"]
+                                if h not in py_seen:
+                                    canonical = canonical_store.get(h, {})
+                                    py_src = canonical.get("python_src", "")
+                                    if py_src:
+                                        py_lines.append(f"# {occ['name']} (translated from {occ.get('lang','')})\n")
+                                        py_lines.append(py_src + "\n\n")
+                                    py_seen.add(h)
+                            zf.writestr(fname + ".py", "".join(py_lines))
+                            restored_files += 1
+
+                    zip_buffer.seek(0)
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Files restored", restored_files)
+                    c2.metric("Unique structures", len(seen_hashes))
+                    c3.metric("Total functions", len(roots))
+                    st.success("AI bundle unpacked!")
+                    st.download_button("📥 Download restored files (.zip)", data=zip_buffer,
+                                      file_name="restored_ai.zip", mime="application/zip")
+                except Exception as e:
+                    st.error(f"AI unpack failed: {e}")
+
     else:
         unpack_mode = st.radio(
         "Restore mode",
@@ -1390,7 +1553,7 @@ with tab_unpack:
 with tab_verify:
     st.subheader("Verify: confirm restored functions match pack hashes")
 
-    verify_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript"], key="verify_lang")
+    verify_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript", "Any Language (AI bundle)"], key="verify_lang")
 
     if verify_lang == "JavaScript / TypeScript":
         st.write("Upload the JS/TS `bundle_js.json` and the restored JS files. SIR will re-hash every function and confirm they match.")
@@ -1425,6 +1588,59 @@ with tab_verify:
                         st.error(f"❌ MISMATCH — {len(missing)} missing, {len(extra)} extra")
                 except Exception as e:
                     st.error(f"Verify failed: {e}")
+    elif verify_lang == "Any Language (AI bundle)":
+        st.write("Upload a `bundle_ai.json` and the original source files. SIR re-translates each function and confirms the structural hashes match the bundle.")
+        verify_ai_bundle = st.file_uploader("Upload bundle_ai.json", type=["json"], key="verify_ai_bundle")
+        verify_ai_files = st.file_uploader("Upload original source files", type=["c","cpp","java","rs","go","rb","php","swift","kt","cs","lua","dart","py","js","ts"], accept_multiple_files=True, key="verify_ai_files")
+
+        if st.button("Verify AI bundle", type="primary"):
+            if not verify_ai_bundle or not verify_ai_files:
+                st.warning("Please upload both the bundle and original files.")
+            else:
+                _ai_cfg = get_ai_config()
+                if _ai_cfg["backend"] == "none":
+                    st.error("No AI backend configured.")
+                else:
+                    try:
+                        from sir_ai_translate import detect_language, extract_raw_functions, translate_to_python
+                        from sir.core import hash_source as _hs
+                        bundle = json.loads(verify_ai_bundle.read().decode("utf-8"))
+                        expected = {r["sir_sha256"] for r in bundle.get("roots", [])}
+                        actual = set()
+                        for f in verify_ai_files:
+                            src = f.read().decode("utf-8", errors="replace")
+                            ext = f.name.rsplit(".",1)[-1].lower()
+                            if ext == "py":
+                                for qualname, lineno, code in extract_functions(src, f.name, False):
+                                    try:
+                                        actual.add(hash_source(code, mode="semantic"))
+                                    except Exception:
+                                        pass
+                            else:
+                                lang = detect_language(f.name) or ext.upper()
+                                raw_funcs = extract_raw_functions(src, lang)
+                                for name, lineno, raw_src in raw_funcs:
+                                    try:
+                                        py_src = translate_to_python(raw_src, lang, backend=_ai_cfg["backend"],
+                                            api_key=_ai_cfg["api_key"], ollama_model=_ai_cfg["ollama_model"],
+                                            ollama_host=_ai_cfg["ollama_host"])
+                                        if py_src.strip():
+                                            actual.add(_hs(py_src, mode="semantic"))
+                                    except Exception:
+                                        pass
+                        missing = expected - actual
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Expected", len(expected))
+                        c2.metric("Found", len(actual))
+                        c3.metric("Missing", len(missing))
+                        if not missing:
+                            st.success("VERIFY SUCCESS — all AI bundle hashes match!")
+                        else:
+                            st.error(f"MISMATCH — {len(missing)} hash(es) not found in re-translation")
+                            st.caption("Note: AI translation may vary slightly between runs. Minor mismatches can be expected.")
+                    except Exception as e:
+                        st.error(f"Verify failed: {e}")
+
     else:
         st.write("Upload the original `bundle.json` and the restored `.py` files. SIR will verify that every function's structural hash matches.")
         verify_bundle = st.file_uploader("Upload bundle.json", type=["json"], key="verify_bundle")
@@ -1477,7 +1693,7 @@ with tab_verify:
 # ─────────────────────────────────────────────
 
 with tab_diff:
-    diff_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript"], key="diff_lang")
+    diff_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript", "Any Language (AI-powered 🤖)"], key="diff_lang")
 
     if diff_lang == "JavaScript / TypeScript":
         st.subheader("Diff: structural diff between two JS/TS file sets")
@@ -1537,9 +1753,84 @@ with tab_diff:
                                 st.write(f"• {', '.join(hashes_b[h])}")
                 except Exception as e:
                     st.error(f"Diff failed: {e}")
+
+    elif diff_lang == "Any Language (AI-powered 🤖)":
+        st.subheader("Diff: structural diff between two multi-language codebases")
+        st.write("Upload two sets of files in any language. SIR translates each function and compares structural hashes.")
+        diff_ai_a = st.file_uploader("Upload Set A", type=["c","cpp","java","rs","go","rb","php","swift","kt","cs","py","js","ts","jsx","tsx"], accept_multiple_files=True, key="diff_ai_a")
+        diff_ai_b = st.file_uploader("Upload Set B", type=["c","cpp","java","rs","go","rb","php","swift","kt","cs","py","js","ts","jsx","tsx"], accept_multiple_files=True, key="diff_ai_b")
+
+        if st.button("Run AI diff", type="primary"):
+            if not diff_ai_a or not diff_ai_b:
+                st.warning("Please upload files for both sets.")
+            else:
+                _ai_cfg = get_ai_config()
+                if _ai_cfg["backend"] == "none":
+                    st.error("No AI backend configured.")
+                else:
+                    try:
+                        from sir_ai_translate import detect_language, extract_raw_functions, translate_to_python
+                        from sir.core import hash_source as _hs
+
+                        def _hash_any_set(files):
+                            groups = defaultdict(list)
+                            for f in files:
+                                src = f.read().decode("utf-8", errors="replace")
+                                ext = f.name.rsplit(".",1)[-1].lower()
+                                if ext == "py":
+                                    for qn, ln, code in extract_functions(src, f.name, False):
+                                        try:
+                                            h = hash_source(code, mode="semantic")
+                                            groups[h].append(f"{f.name}::{qn}")
+                                        except Exception: pass
+                                elif ext in ("js","jsx","ts","tsx"):
+                                    from sir_js import extract_js_functions, tokenize as _jt, canonicalize_js as _cj
+                                    for name, lineno, params, body_src in extract_js_functions(src, f.name):
+                                        try:
+                                            sir = _cj(params, _jt(body_src))
+                                            groups[sir["sir_sha256"]].append(f"{f.name}::{name}")
+                                        except Exception: pass
+                                else:
+                                    lang = detect_language(f.name) or ext.upper()
+                                    for name, lineno, raw_src in extract_raw_functions(src, lang):
+                                        try:
+                                            py_src = translate_to_python(raw_src, lang, backend=_ai_cfg["backend"],
+                                                api_key=_ai_cfg["api_key"], ollama_model=_ai_cfg["ollama_model"],
+                                                ollama_host=_ai_cfg["ollama_host"])
+                                            if py_src.strip():
+                                                groups[_hs(py_src, mode="semantic")].append(f"{f.name}::{name}")
+                                        except Exception: pass
+                            return groups
+
+                        hashes_a = _hash_any_set(diff_ai_a)
+                        hashes_b = _hash_any_set(diff_ai_b)
+                        set_a, set_b = set(hashes_a), set(hashes_b)
+                        common, only_a, only_b = set_a & set_b, set_a - set_b, set_b - set_a
+                        total_a = sum(len(v) for v in hashes_a.values())
+                        total_b = sum(len(v) for v in hashes_b.values())
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        c1.metric("Shared", len(common))
+                        c2.metric("Only in A", len(only_a))
+                        c3.metric("Only in B", len(only_b))
+                        c4.metric("Health A", f"{int(100*len(set_a)/max(total_a,1))}/100")
+                        c5.metric("Health B", f"{int(100*len(set_b)/max(total_b,1))}/100")
+                        st.divider()
+                        if common:
+                            with st.expander(f"✅ {len(common)} shared", expanded=False):
+                                for h in sorted(common):
+                                    st.write(f"A: {', '.join(hashes_a[h])}  ↔  B: {', '.join(hashes_b[h])}")
+                        if only_a:
+                            with st.expander(f"🔴 {len(only_a)} only in A", expanded=True):
+                                for h in sorted(only_a): st.write(f"• {', '.join(hashes_a[h])}")
+                        if only_b:
+                            with st.expander(f"🟢 {len(only_b)} only in B", expanded=True):
+                                for h in sorted(only_b): st.write(f"• {', '.join(hashes_b[h])}")
+                    except Exception as e:
+                        st.error(f"AI diff failed: {e}")
+
     else:
-            st.subheader("Diff: compare two sets of Python files structurally")
-    st.write("Upload files for **Set A** and **Set B**. SIR shows which logical structures are shared, unique to A, or unique to B.")
+        st.subheader("Diff: compare two sets of Python files structurally")
+        st.write("Upload files for **Set A** and **Set B**. SIR shows which logical structures are shared, unique to A, or unique to B.")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -1600,7 +1891,7 @@ with tab_diff:
 # ─────────────────────────────────────────────
 
 with tab_merge:
-    merge_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript"], key="merge_lang")
+    merge_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript", "Any Language (AI-powered 🤖)"], key="merge_lang")
 
     if merge_lang == "JavaScript / TypeScript":
         st.subheader("Merge: remove duplicate JS/TS functions and consolidate into utils.js")
@@ -1702,6 +1993,146 @@ with tab_merge:
                                           file_name="merged_js.zip", mime="application/zip")
                 except Exception as e:
                     st.error(f"Merge failed: {e}")
+
+    elif merge_lang == "Any Language (AI-powered 🤖)":
+        st.subheader("Merge: remove duplicate functions across any language")
+        st.write("Upload code files in any language. SIR uses AI to translate each function to Python, finds structural duplicates, and produces a report showing which functions are equivalent across files and languages.")
+        st.warning("AI merge identifies duplicates and produces a report. It does not rewrite your original source files — you review the findings and decide what to consolidate.")
+        ai_merge_uploaded = st.file_uploader(
+            "Upload code files (any language)",
+            type=["c","cpp","cc","cxx","h","hpp","java","rs","go","rb","php","swift",
+                  "kt","scala","cs","lua","dart","hs","ex","ml","fs","jl","nim","zig","r","pl",
+                  "py","js","ts","jsx","tsx"],
+            accept_multiple_files=True, key="ai_merge_upload"
+        )
+        ai_merge_min = st.number_input("Min duplicates to flag", min_value=2, max_value=50, value=2, step=1, key="ai_merge_min")
+
+        if st.button("Run AI merge analysis", type="primary"):
+            if not ai_merge_uploaded:
+                st.warning("Please upload at least one file.")
+            else:
+                _ai_cfg = get_ai_config()
+                if _ai_cfg["backend"] == "none":
+                    st.error("No AI backend configured. Set up Ollama or add an Anthropic API key in the sidebar.")
+                else:
+                    try:
+                        from sir_ai_translate import detect_language, extract_raw_functions, translate_to_python
+                        from sir.core import hash_source as _hs
+
+                        ai_merge_groups = defaultdict(list)
+                        all_translated = []
+                        total_ai_merge = 0
+                        errors_ai_merge = 0
+                        progress = st.progress(0, text="Translating...")
+                        status = st.empty()
+
+                        for i, f in enumerate(ai_merge_uploaded):
+                            status.text(f"Translating {f.name}...")
+                            src = f.read().decode("utf-8", errors="replace")
+                            ext = f.name.rsplit(".",1)[-1].lower()
+
+                            # Route native languages directly
+                            if ext == "py":
+                                for qualname, lineno, code in extract_functions(src, f.name, False):
+                                    total_ai_merge += 1
+                                    try:
+                                        h = hash_source(code, mode="semantic")
+                                        entry = {"file": f.name, "name": qualname, "lineno": lineno,
+                                                 "lang": "Python", "original": code, "python": code, "sir_sha256": h}
+                                        ai_merge_groups[h].append(entry)
+                                        all_translated.append(entry)
+                                    except Exception:
+                                        errors_ai_merge += 1
+                            elif ext in ("js","jsx","ts","tsx"):
+                                from sir_js import extract_js_functions, tokenize as _jt, canonicalize_js as _cj
+                                for name, lineno, params, body_src in extract_js_functions(src, f.name):
+                                    total_ai_merge += 1
+                                    try:
+                                        sir = _cj(params, _jt(body_src))
+                                        h = sir["sir_sha256"]
+                                        entry = {"file": f.name, "name": name, "lineno": lineno,
+                                                 "lang": "JS/TS", "original": body_src, "python": body_src, "sir_sha256": h}
+                                        ai_merge_groups[h].append(entry)
+                                        all_translated.append(entry)
+                                    except Exception:
+                                        errors_ai_merge += 1
+                            else:
+                                lang = detect_language(f.name) or ext.upper()
+                                raw_funcs = extract_raw_functions(src, lang)
+                                for name, lineno, raw_src in raw_funcs:
+                                    total_ai_merge += 1
+                                    try:
+                                        py_src = translate_to_python(
+                                            raw_src, lang,
+                                            backend=_ai_cfg["backend"],
+                                            api_key=_ai_cfg["api_key"],
+                                            ollama_model=_ai_cfg["ollama_model"],
+                                            ollama_host=_ai_cfg["ollama_host"]
+                                        )
+                                        if py_src.strip():
+                                            h = _hs(py_src, mode="semantic")
+                                            entry = {"file": f.name, "name": name, "lineno": lineno,
+                                                     "lang": lang, "original": raw_src, "python": py_src, "sir_sha256": h}
+                                            ai_merge_groups[h].append(entry)
+                                            all_translated.append(entry)
+                                    except Exception:
+                                        errors_ai_merge += 1
+                            progress.progress((i+1)/len(ai_merge_uploaded), text=f"Processed {i+1}/{len(ai_merge_uploaded)} files")
+
+                        progress.progress(1.0, text="Analysis complete!")
+                        status.empty()
+
+                        ai_merge_dupes = {h: v for h, v in ai_merge_groups.items() if len(v) >= int(ai_merge_min)}
+                        cross_lang = {h: v for h, v in ai_merge_dupes.items() if len(set(o["lang"] for o in v)) > 1}
+                        health_before = int(100 * len(ai_merge_groups) / max(total_ai_merge, 1))
+                        remaining = total_ai_merge - sum(len(v)-1 for v in ai_merge_dupes.values())
+                        health_after = min(int(100 * len(ai_merge_groups) / max(remaining, 1)), 100)
+
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        c1.metric("Functions scanned", total_ai_merge)
+                        c2.metric("Duplicate clusters", len(ai_merge_dupes))
+                        c3.metric("Cross-language", len(cross_lang))
+                        c4.metric("Health before", f"{health_before}/100")
+                        c5.metric("Health after", f"{health_after}/100")
+                        if errors_ai_merge:
+                            st.caption(f"{errors_ai_merge} function(s) could not be translated.")
+                        st.divider()
+
+                        if not ai_merge_dupes:
+                            st.success("No structural duplicates found across any language!")
+                        else:
+                            if cross_lang:
+                                st.error(f"{len(cross_lang)} cross-language duplicate(s) found — same logic in different languages!")
+
+                            report_lines = ["# SIR Engine — AI Merge Report\n\n"]
+                            report_lines.append(f"Files: {len(ai_merge_uploaded)} | Functions: {total_ai_merge} | Duplicate clusters: {len(ai_merge_dupes)} | Cross-language: {len(cross_lang)}\n\n")
+
+                            for h, occs in sorted(ai_merge_dupes.items(), key=lambda x: -len(x[1])):
+                                langs = set(o["lang"] for o in occs)
+                                is_cross = len(langs) > 1
+                                icon = "🌐" if is_cross else "🔴"
+                                with st.expander(f"{icon} {len(occs)} duplicates across {', '.join(sorted(langs))} — hash: {h[:16]}...", expanded=is_cross):
+                                    if is_cross:
+                                        st.info("Same logic detected across multiple languages. Consider consolidating into a shared utility.")
+                                    report_lines.append(f"## Cluster {h[:16]}... ({len(occs)} duplicates)\n\n")
+                                    for o in occs:
+                                        st.markdown(f"**`{o['name']}`** — `{o['file']}` (line {o['lineno']}) [{o['lang']}]")
+                                        lang_key = {"Python": "python", "JS/TS": "javascript"}.get(o["lang"], "c")
+                                        st.code(o["original"][:500], language=lang_key)
+                                        if o["lang"] not in ("Python", "JS/TS") and o.get("python"):
+                                            with st.expander("Show translated Python"):
+                                                st.code(o["python"], language="python")
+                                        report_lines.append(f"- `{o['name']}` in `{o['file']}` (line {o['lineno']}) [{o['lang']}]\n")
+                                    report_lines.append("\n")
+
+                            st.download_button(
+                                "📥 Download merge report (.md)",
+                                data="".join(report_lines),
+                                file_name="sir_ai_merge_report.md",
+                                mime="text/markdown"
+                            )
+                    except Exception as e:
+                        st.error(f"AI merge failed: {e}")
 
     else:
         st.subheader("Merge: eliminate duplicate functions from your codebase")
