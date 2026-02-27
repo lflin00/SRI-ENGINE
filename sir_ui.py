@@ -259,7 +259,7 @@ with tab_scan:
 
     scan_lang = st.selectbox(
         "Language",
-        ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)", "Cross-Language (all)"],
+        ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)", "Cross-Language (all)", "Any Language (AI-powered 🤖)"],
         key="scan_lang"
     )
 
@@ -476,6 +476,131 @@ with tab_scan:
                                     st.markdown(f"**`{o['name']}`** in `{o['file']}` (line {o['lineno']})")
                                     st.code(o["body"], language="typescript")
 
+    # ── AI UNIVERSAL SCAN ────────────────────────
+    elif scan_lang == "Any Language (AI-powered 🤖)":
+        st.write("Upload code files in **any language** — C, C++, Java, Rust, Go, Ruby, Swift, Kotlin, and more. SIR uses AI to translate each function to Python, then runs the full structural analysis.")
+
+        st.info("**How it works:** Claude translates each function to equivalent Python, preserving logical structure. The result is hashed through the same SIR pipeline as native Python. This means you can compare a Java function against a Python function against a C++ function.")
+
+        st.warning("**Limitations (AI translation layer):** Results are highly reliable but not mathematically guaranteed like the native Python/JS pipelines. Very complex language-specific features may be simplified. Best for pure logic functions.")
+
+        ai_uploaded = st.file_uploader(
+            "Upload code files (any language)",
+            type=["c", "cpp", "cc", "cxx", "h", "hpp", "java", "rs", "go", "rb",
+                  "php", "swift", "kt", "scala", "cs", "lua", "dart", "hs", "ex",
+                  "ml", "fs", "jl", "nim", "zig", "r", "pl", "py", "js", "ts"],
+            accept_multiple_files=True,
+            key="ai_scan_upload"
+        )
+        ai_min = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="ai_min")
+
+        if st.button("Run AI scan", type="primary"):
+            if not ai_uploaded:
+                st.warning("Please upload at least one file.")
+            else:
+                try:
+                    from sir_ai_translate import extract_any_functions, detect_language, is_ai_language, translate_to_python
+                    from sir.core import hash_source as _hash_source
+
+                    ai_groups = defaultdict(list)
+                    total_ai = 0
+                    errors_ai = 0
+                    translations = []
+                    progress = st.progress(0, text="Starting AI translation scan...")
+                    status = st.empty()
+
+                    for i, f in enumerate(ai_uploaded):
+                        status.text(f"Translating {f.name}...")
+                        src = f.read().decode("utf-8", errors="replace")
+                        ext = f.name.rsplit(".", 1)[-1].lower()
+
+                        # Route to native pipelines for Python/JS/TS
+                        if ext == "py":
+                            for qualname, lineno, code in extract_functions(src, f.name, False):
+                                total_ai += 1
+                                try:
+                                    h = hash_source(code, mode="semantic")
+                                    ai_groups[h].append({"file": f.name, "name": qualname,
+                                                         "lineno": lineno, "lang": "Python",
+                                                         "code": code, "translated": False})
+                                except Exception:
+                                    errors_ai += 1
+                        elif ext in ("js", "jsx", "ts", "tsx"):
+                            from sir_js import extract_js_functions, tokenize as _jt, canonicalize_js as _cj
+                            for name, lineno, params, body_src in extract_js_functions(src, f.name):
+                                total_ai += 1
+                                try:
+                                    sir = _cj(params, _jt(body_src))
+                                    ai_groups[sir["sir_sha256"]].append({"file": f.name, "name": name,
+                                                                         "lineno": lineno, "lang": "JS/TS",
+                                                                         "code": body_src, "translated": False})
+                                except Exception:
+                                    errors_ai += 1
+                        else:
+                            # AI translation path
+                            lang = detect_language(f.name) or ext.upper()
+                            try:
+                                from sir_ai_translate import extract_raw_functions
+                                raw_funcs = extract_raw_functions(src, lang)
+                                for name, lineno, raw_src in raw_funcs:
+                                    total_ai += 1
+                                    try:
+                                        py_src = translate_to_python(raw_src, lang)
+                                        if py_src.strip():
+                                            h = _hash_source(py_src, mode="semantic")
+                                            ai_groups[h].append({"file": f.name, "name": name,
+                                                                  "lineno": lineno, "lang": lang,
+                                                                  "code": raw_src, "translated": True,
+                                                                  "python_src": py_src})
+                                    except Exception:
+                                        errors_ai += 1
+                            except Exception:
+                                errors_ai += 1
+
+                        progress.progress((i+1)/len(ai_uploaded), text=f"Processed {i+1}/{len(ai_uploaded)} files")
+
+                    progress.progress(1.0, text="Done!")
+                    status.empty()
+
+                    ai_dupes = {h: v for h, v in ai_groups.items() if len(v) >= int(ai_min)}
+                    cross_lang = {h: v for h, v in ai_dupes.items() if len(set(o["lang"] for o in v)) > 1}
+                    health = int(100 * len(ai_groups) / max(total_ai, 1))
+
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Files", len(ai_uploaded))
+                    c2.metric("Functions", total_ai)
+                    c3.metric("Duplicate clusters", len(ai_dupes))
+                    c4.metric("Cross-language", len(cross_lang))
+                    c5.metric("Health score", f"{health}/100")
+                    if errors_ai:
+                        st.caption(f"{errors_ai} function(s) could not be translated or hashed.")
+                    st.divider()
+
+                    if not ai_dupes:
+                        st.success("No structural duplicates found across any language!")
+                    else:
+                        if cross_lang:
+                            st.error(f"Found {len(cross_lang)} cross-language duplicate(s)!")
+                        for h, occs in sorted(ai_dupes.items(), key=lambda x: -len(x[1])):
+                            langs = set(o["lang"] for o in occs)
+                            is_cross = len(langs) > 1
+                            icon = "🌐" if is_cross else "🔴"
+                            with st.expander(f"{icon} {len(occs)} duplicates across {', '.join(sorted(langs))} — hash: {h[:16]}...", expanded=is_cross):
+                                if is_cross:
+                                    st.info("Same logic detected across multiple languages via AI translation.")
+                                for o in occs:
+                                    translated_note = " *(AI translated)*" if o.get("translated") else ""
+                                    st.markdown(f"**`{o['name']}`** — `{o['file']}` (line {o['lineno']}) [{o['lang']}]{translated_note}")
+                                    lang_key = {"Python": "python", "JS/TS": "javascript"}.get(o["lang"], "c")
+                                    st.code(o["code"][:600], language=lang_key)
+                                    if o.get("translated") and o.get("python_src"):
+                                        with st.expander("Show translated Python"):
+                                            st.code(o["python_src"], language="python")
+
+                except Exception as e:
+                    st.error(f"AI scan failed: {e}")
+                    st.caption("Make sure sir_ai_translate.py is in your SIR_MAIN folder.")
+
     # ── CROSS-LANGUAGE SCAN ───────────────────────
     elif scan_lang == "Cross-Language (all)":
         st.write("Upload any mix of `.py`, `.js`, `.ts`, `.jsx`, or `.tsx` files. SIR finds functions that are structurally identical across languages.")
@@ -565,7 +690,7 @@ with tab_github:
     )
     gh_lang = st.selectbox(
         "Language to scan",
-        ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)", "All languages"],
+        ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)", "All languages", "Any Language (AI-powered 🤖)"],
         key="gh_lang"
     )
     gh_min = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="gh_min")
@@ -606,6 +731,10 @@ with tab_github:
                     target_exts = (".js", ".jsx")
                 elif "TypeScript" in gh_lang:
                     target_exts = (".ts", ".tsx")
+                elif "AI-powered" in gh_lang:
+                    target_exts = (".py", ".js", ".jsx", ".ts", ".tsx",
+                                   ".c", ".cpp", ".cc", ".java", ".rs", ".go",
+                                   ".rb", ".php", ".swift", ".kt", ".cs", ".lua", ".dart")
                 else:
                     target_exts = (".py", ".js", ".jsx", ".ts", ".tsx")
 
@@ -686,7 +815,7 @@ with tab_github:
                                     })
                                 except Exception:
                                     pass
-                        else:
+                        elif any(fpath.endswith(e) for e in (".js", ".jsx", ".ts", ".tsx")):
                             from sir_js import extract_js_functions, tokenize as _jt, canonicalize_js as _cj
                             funcs = extract_js_functions(src, fpath)
                             for name, lineno, params, body_src in funcs:
@@ -700,6 +829,25 @@ with tab_github:
                                         "file": fpath, "name": name,
                                         "lineno": lineno, "lang": "JS/TS", "code": body_src
                                     })
+                                except Exception:
+                                    pass
+                        elif "AI-powered" in gh_lang:
+                            from sir_ai_translate import detect_language, extract_raw_functions, translate_to_python
+                            lang = detect_language(fpath) or fpath.rsplit(".", 1)[-1].upper()
+                            raw_funcs = extract_raw_functions(src, lang)
+                            for name, lineno, raw_src in raw_funcs:
+                                if name in ignored_names:
+                                    continue
+                                total_gh_funcs += 1
+                                try:
+                                    py_src = translate_to_python(raw_src, lang)
+                                    if py_src.strip():
+                                        h = hash_source(py_src, mode="semantic")
+                                        gh_groups[h].append({
+                                            "file": fpath, "name": name,
+                                            "lineno": lineno, "lang": lang,
+                                            "code": raw_src, "translated": True
+                                        })
                                 except Exception:
                                     pass
                     except Exception:
