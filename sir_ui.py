@@ -539,11 +539,72 @@ with tab_scan:
 # ─────────────────────────────────────────────
 
 with tab_pack:
-    st.subheader("Pack: compress Python files into a SIR bundle")
-    st.write("Upload `.py` files — SIR encodes each function into a structural node graph, deduplicates shared logic, and bundles everything into a single downloadable `bundle.json`.")
+    st.subheader("Pack: compress files into a SIR bundle")
 
-    pack_uploaded = st.file_uploader("Upload Python files to pack", type=["py"], accept_multiple_files=True, key="pack_upload")
-    pack_methods = st.checkbox("Include class methods", value=False, key="pack_methods")
+    pack_lang = st.selectbox("Language", ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)"], key="pack_lang")
+
+    if pack_lang == "Python (.py)":
+        st.write("Upload `.py` files — SIR encodes each function into a structural node graph, deduplicates shared logic, and bundles everything into a single downloadable `bundle.json`.")
+        pack_uploaded = st.file_uploader("Upload Python files to pack", type=["py"], accept_multiple_files=True, key="pack_upload")
+        pack_methods = st.checkbox("Include class methods", value=False, key="pack_methods")
+    else:
+        _exts = ["js", "jsx"] if "JavaScript" in pack_lang else ["ts", "tsx"]
+        st.write(f"Upload `{'`, `'.join('.' + e for e in _exts)}` files — SIR tokenises each function, strips type annotations, deduplicates by structural hash, and bundles into `bundle_js.json`.")
+        pack_uploaded_js = st.file_uploader(f"Upload {pack_lang} files", type=_exts, accept_multiple_files=True, key="pack_js_upload")
+
+        if st.button("Build JS/TS pack", type="primary"):
+            if not pack_uploaded_js:
+                st.warning("Please upload at least one file.")
+            else:
+                try:
+                    from sir_js import extract_js_functions, tokenize as js_tokenize, canonicalize_js
+                    import hashlib as _hashlib
+                    js_canonical_store = {}
+                    js_roots = []
+                    js_namemaps = {}
+                    total_js = 0
+                    progress = st.progress(0, text="Packing...")
+                    status = st.empty()
+                    for i, f in enumerate(pack_uploaded_js):
+                        status.text(f"Encoding {f.name}...")
+                        src = f.read().decode("utf-8", errors="replace")
+                        funcs = extract_js_functions(src, f.name)
+                        for name, lineno, params, body_src in funcs:
+                            total_js += 1
+                            body_tokens = js_tokenize(body_src)
+                            sir = canonicalize_js(params, body_tokens)
+                            h = sir["sir_sha256"]
+                            occ_key = f"{f.name}::{name}::{lineno}"
+                            if h not in js_canonical_store:
+                                js_canonical_store[h] = {"sir_sha256": h, "params_count": len(params), "body_src": body_src}
+                            js_namemaps[occ_key] = {"sir_sha256": h, "name_map": sir.get("name_map", {}), "original_params": params}
+                            js_roots.append({"sir_sha256": h, "file": f.name, "name": name, "lineno": lineno, "occurrence_key": occ_key})
+                        progress.progress((i+1)/len(pack_uploaded_js), text=f"Packed {i+1}/{len(pack_uploaded_js)} files")
+                    progress.progress(1.0, text="Done!")
+                    status.empty()
+
+                    unique = len(js_canonical_store)
+                    deduped = total_js - unique
+                    health = int(100 * unique / max(total_js, 1))
+                    bundle = {"format": "SIR-JS-PACK", "version": "0.1", "total_functions": total_js,
+                              "unique_structures": unique, "canonical_store": js_canonical_store,
+                              "roots": js_roots, "namemaps": js_namemaps}
+                    bundle_json = json.dumps(bundle, indent=2)
+
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Files", len(pack_uploaded_js))
+                    c2.metric("Functions", total_js)
+                    c3.metric("Unique structures", unique)
+                    c4.metric("Duplicates removed", deduped)
+                    c5.metric("Health score", f"{health}/100")
+                    st.success("✅ JS/TS pack built!")
+                    st.download_button("📥 Download bundle_js.json", data=bundle_json, file_name="bundle_js.json", mime="application/json")
+                except Exception as e:
+                    st.error(f"Pack failed: {e}")
+
+    if pack_lang == "Python (.py)":
+        pack_methods = locals().get("pack_methods", False)
+        pack_uploaded = locals().get("pack_uploaded", None)
 
     if st.button("Build pack", type="primary"):
         if not pack_uploaded:
@@ -795,9 +856,45 @@ with tab_unpack:
 
 with tab_verify:
     st.subheader("Verify: confirm restored functions match pack hashes")
-    st.write("Upload the original `bundle.json` and the restored `.py` files. SIR will verify that every function's structural hash matches.")
 
-    verify_bundle = st.file_uploader("Upload bundle.json", type=["json"], key="verify_bundle")
+    verify_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript"], key="verify_lang")
+
+    if verify_lang == "JavaScript / TypeScript":
+        st.write("Upload the JS/TS `bundle_js.json` and the restored JS files. SIR will re-hash every function and confirm they match.")
+        verify_bundle_js = st.file_uploader("Upload bundle_js.json", type=["json"], key="verify_bundle_js")
+        verify_restored_js = st.file_uploader("Upload restored JS/TS files", type=["js","jsx","ts","tsx"], accept_multiple_files=True, key="verify_restored_js")
+
+        if st.button("Verify JS/TS", type="primary"):
+            if not verify_bundle_js or not verify_restored_js:
+                st.warning("Please upload both the bundle and restored files.")
+            else:
+                try:
+                    from sir_js import extract_js_functions, tokenize as js_tokenize, canonicalize_js
+                    bundle = json.loads(verify_bundle_js.read().decode("utf-8"))
+                    expected = {r["sir_sha256"] for r in bundle.get("roots", [])}
+                    actual = set()
+                    for f in verify_restored_js:
+                        src = f.read().decode("utf-8", errors="replace")
+                        funcs = extract_js_functions(src, f.name)
+                        for name, lineno, params, body_src in funcs:
+                            body_tokens = js_tokenize(body_src)
+                            sir = canonicalize_js(params, body_tokens)
+                            actual.add(sir["sir_sha256"])
+                    missing = expected - actual
+                    extra = actual - expected
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Expected hashes", len(expected))
+                    c2.metric("Found hashes", len(actual))
+                    c3.metric("Missing", len(missing))
+                    if not missing and not extra:
+                        st.success("✅ VERIFY SUCCESS — all JS/TS structural hashes match!")
+                    else:
+                        st.error(f"❌ MISMATCH — {len(missing)} missing, {len(extra)} extra")
+                except Exception as e:
+                    st.error(f"Verify failed: {e}")
+    else:
+        st.write("Upload the original `bundle.json` and the restored `.py` files. SIR will verify that every function's structural hash matches.")
+        verify_bundle = st.file_uploader("Upload bundle.json", type=["json"], key="verify_bundle")
     verify_files = st.file_uploader("Upload restored .py files", type=["py"], accept_multiple_files=True, key="verify_files")
 
     if st.button("Run verify", type="primary"):
@@ -847,7 +944,68 @@ with tab_verify:
 # ─────────────────────────────────────────────
 
 with tab_diff:
-    st.subheader("Diff: compare two sets of Python files structurally")
+    diff_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript"], key="diff_lang")
+
+    if diff_lang == "JavaScript / TypeScript":
+        st.subheader("Diff: structural diff between two JS/TS file sets")
+        st.write("Upload two sets of JS/TS files. SIR finds shared logic, additions, and removals by structural hash.")
+        diff_js_a = st.file_uploader("Upload Set A (JS/TS)", type=["js","jsx","ts","tsx"], accept_multiple_files=True, key="diff_js_a")
+        diff_js_b = st.file_uploader("Upload Set B (JS/TS)", type=["js","jsx","ts","tsx"], accept_multiple_files=True, key="diff_js_b")
+
+        if st.button("Run JS/TS diff", type="primary"):
+            if not diff_js_a or not diff_js_b:
+                st.warning("Please upload files for both sets.")
+            else:
+                try:
+                    from sir_js import extract_js_functions, tokenize as js_tokenize, canonicalize_js
+                    def _hash_js_files(files):
+                        groups = defaultdict(list)
+                        for f in files:
+                            src = f.read().decode("utf-8", errors="replace")
+                            funcs = extract_js_functions(src, f.name)
+                            for name, lineno, params, body_src in funcs:
+                                body_tokens = js_tokenize(body_src)
+                                sir = canonicalize_js(params, body_tokens)
+                                groups[sir["sir_sha256"]].append(f"{f.name}::{name}")
+                        return groups
+
+                    hashes_a = _hash_js_files(diff_js_a)
+                    diff_js_b_reset = [f for f in diff_js_b]
+                    hashes_b = _hash_js_files(diff_js_b)
+
+                    set_a, set_b = set(hashes_a), set(hashes_b)
+                    common = set_a & set_b
+                    only_a = set_a - set_b
+                    only_b = set_b - set_a
+                    total_a = sum(len(v) for v in hashes_a.values())
+                    total_b = sum(len(v) for v in hashes_b.values())
+                    health_a = int(100 * len(set_a) / max(total_a, 1))
+                    health_b = int(100 * len(set_b) / max(total_b, 1))
+
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Shared structures", len(common))
+                    c2.metric("Only in A", len(only_a))
+                    c3.metric("Only in B", len(only_b))
+                    c4.metric("Health A", f"{health_a}/100")
+                    c5.metric("Health B", f"{health_b}/100")
+                    st.divider()
+
+                    if common:
+                        with st.expander(f"✅ {len(common)} shared structures", expanded=False):
+                            for h in sorted(common):
+                                st.write(f"A: {', '.join(hashes_a[h])}  ↔  B: {', '.join(hashes_b[h])}")
+                    if only_a:
+                        with st.expander(f"🔴 {len(only_a)} only in A (removed or not ported)", expanded=True):
+                            for h in sorted(only_a):
+                                st.write(f"• {', '.join(hashes_a[h])}")
+                    if only_b:
+                        with st.expander(f"🟢 {len(only_b)} only in B (added or new)", expanded=True):
+                            for h in sorted(only_b):
+                                st.write(f"• {', '.join(hashes_b[h])}")
+                except Exception as e:
+                    st.error(f"Diff failed: {e}")
+    else:
+            st.subheader("Diff: compare two sets of Python files structurally")
     st.write("Upload files for **Set A** and **Set B**. SIR shows which logical structures are shared, unique to A, or unique to B.")
 
     col_a, col_b = st.columns(2)
@@ -909,12 +1067,116 @@ with tab_diff:
 # ─────────────────────────────────────────────
 
 with tab_merge:
-    st.subheader("Merge: eliminate duplicate functions from your codebase")
-    st.write(
-        "Upload your `.py` files. SIR finds duplicate function clusters, "
-        "you pick which name to keep for each cluster, and it produces a cleaned-up "
-        "zip with all duplicates removed, calls renamed, and shared functions moved to `utils.py`."
-    )
+    merge_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript"], key="merge_lang")
+
+    if merge_lang == "JavaScript / TypeScript":
+        st.subheader("Merge: remove duplicate JS/TS functions and consolidate into utils.js")
+        st.write("Upload JS/TS files — SIR finds all structural duplicates, keeps one canonical version, removes the rest, and rewrites call sites.")
+        st.warning("Always back up your code before merging. Review the output before using in production.")
+        merge_js_uploaded = st.file_uploader("Upload JS/TS files", type=["js","jsx","ts","tsx"], accept_multiple_files=True, key="merge_js_upload")
+        merge_js_min = st.number_input("Min duplicates to merge", min_value=2, max_value=50, value=2, step=1, key="merge_js_min")
+
+        if st.button("Run JS/TS merge", type="primary"):
+            if not merge_js_uploaded:
+                st.warning("Please upload at least one file.")
+            else:
+                try:
+                    import re as _re
+                    from sir_js import extract_js_functions, tokenize as js_tokenize, canonicalize_js
+
+                    file_sources = {}
+                    all_funcs = []
+                    for f in merge_js_uploaded:
+                        src = f.read().decode("utf-8", errors="replace")
+                        file_sources[f.name] = src
+                        funcs = extract_js_functions(src, f.name)
+                        for name, lineno, params, body_src in funcs:
+                            body_tokens = js_tokenize(body_src)
+                            sir = canonicalize_js(params, body_tokens)
+                            all_funcs.append({"file": f.name, "name": name, "lineno": lineno,
+                                              "params": params, "body_src": body_src,
+                                              "sir_sha256": sir["sir_sha256"]})
+
+                    groups = defaultdict(list)
+                    for fn in all_funcs:
+                        groups[fn["sir_sha256"]].append(fn)
+                    dupes = {h: v for h, v in groups.items() if len(v) >= int(merge_js_min)}
+
+                    if not dupes:
+                        st.success("No duplicate JS/TS functions found!")
+                    else:
+                        modified = dict(file_sources)
+                        utils_functions = {}
+                        changes = []
+
+                        for h, occs in dupes.items():
+                            canonical = occs[0]
+                            canon_name = canonical["name"]
+                            params_str = ", ".join(canonical["params"])
+                            utils_functions[canon_name] = f"function {canon_name}({params_str}) {canonical['body_src']}"
+
+                            for occ in occs:
+                                src = modified.get(occ["file"], "")
+                                pat = r"function\s+" + _re.escape(occ["name"]) + r"\s*\([^)]*\)\s*\{"
+                                m = _re.search(pat, src)
+                                if m:
+                                    brace_start = src.index("{", m.start())
+                                    depth = 0
+                                    end = brace_start
+                                    for idx in range(brace_start, len(src)):
+                                        if src[idx] == "{": depth += 1
+                                        elif src[idx] == "}":
+                                            depth -= 1
+                                            if depth == 0: end = idx + 1; break
+                                    src = src[:m.start()].rstrip() + "\n\n" + src[end:].lstrip()
+                                if occ["name"] != canon_name:
+                                    src = _re.sub(r"" + _re.escape(occ["name"]) + r"\s*\(", canon_name + "(", src)
+                                import_line = f"import {{ {canon_name} }} from './utils.js';"
+                                if import_line not in src:
+                                    src = import_line + "\n" + src
+                                modified[occ["file"]] = src
+                                changes.append({"file": occ["file"], "removed": occ["name"], "canonical": canon_name})
+
+                        utils_src = "// utils.js - canonical functions by SIR Engine\n\n"
+                        for name, src in utils_functions.items():
+                            utils_src += src + "\n\n"
+
+                        health_before = int(100 * len(groups) / max(len(all_funcs), 1))
+                        remaining = len(all_funcs) - sum(len(v)-1 for v in dupes.values())
+                        health_after = min(int(100 * len(groups) / max(remaining, 1)), 100)
+
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Duplicates removed", len(changes))
+                        c2.metric("Canonical functions", len(utils_functions))
+                        c3.metric("Health before", f"{health_before}/100")
+                        c4.metric("Health after", f"{health_after}/100")
+                        st.divider()
+
+                        for ch in changes:
+                            st.markdown(f"Removed **`{ch['removed']}`** from `{ch['file']}` kept as **`{ch['canonical']}`** in `utils.js`")
+
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for fname, src in modified.items():
+                                zf.writestr(fname, src)
+                            zf.writestr("utils.js", utils_src)
+                            report = {"changes": changes, "canonical_functions": list(utils_functions.keys())}
+                            zf.writestr("sir_js_merge_report.json", json.dumps(report, indent=2))
+                        zip_buffer.seek(0)
+
+                        st.success(f"Merged {len(changes)} duplicate(s) into utils.js!")
+                        st.download_button("Download merged codebase (.zip)", data=zip_buffer,
+                                          file_name="merged_js.zip", mime="application/zip")
+                except Exception as e:
+                    st.error(f"Merge failed: {e}")
+
+    else:
+        st.subheader("Merge: eliminate duplicate functions from your codebase")
+        st.write(
+            "Upload your `.py` files. SIR finds duplicate function clusters, "
+            "you pick which name to keep for each cluster, and it produces a cleaned-up "
+            "zip with all duplicates removed, calls renamed, and shared functions moved to `utils.py`."
+        )
 
     merge_uploaded = st.file_uploader(
         "Upload Python files", type=["py"], accept_multiple_files=True, key="merge_upload"
