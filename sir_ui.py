@@ -2438,4 +2438,21 @@ Best for pure logic functions. Marked as *(AI translated)* in results so you alw
 
 ---
 **Built by Lucas Flinders** · [GitHub](https://github.com/lflin00/SRI-ENGINE) · [Live App](https://sri-engine-7amwtce7a23k7q34cpnxem.streamlit.app)
+
+---
+
+### License
+
+SIR Engine is licensed under the **Business Source License 1.1 (BSL 1.1)**.
+
+- ✅ Free for personal use
+- ✅ Free for educational and research use
+- ✅ Free for internal business use
+- ❌ Commercial hosted/SaaS use requires a license from the author
+
+On **February 27, 2030** this software automatically converts to the MIT License and becomes fully open source.
+
+The AI-mediated universal semantic IR method implemented in this software — using large language models as universal intermediate representation frontends for cross-language structural equivalence detection — was conceived and first implemented by Lucas Flinders in February 2026.
+
+[View full license on GitHub](https://github.com/lflin00/SRI-ENGINE/blob/main/LICENSE) · For commercial licensing: [github.com/lflin00/SRI-ENGINE](https://github.com/lflin00/SRI-ENGINE)
 """)
