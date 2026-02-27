@@ -1877,50 +1877,134 @@ with tab_merge:
 # ─────────────────────────────────────────────
 
 with tab_about:
-    st.subheader("What is SIR Engine?")
+    st.subheader("SIR Engine — Semantic Code Intelligence")
     st.markdown("""
-**SIR (Structured Intermediate Representation)** is a semantic code analysis engine for Python.
+**SIR** stands for **Semantic Intermediate Representation**.
 
-Instead of comparing code as text, SIR parses Python into an abstract syntax tree, strips away 
-all cosmetic differences (variable names, formatting, comments), and reduces it to its pure logical structure.
-Two functions that do the same thing will always produce the **same structural hash** — even if they look completely different on the surface.
+Instead of comparing code as text, SIR strips away every cosmetic detail — variable names, formatting,
+comments, type annotations — and reduces every function to its pure logical structure. Two functions
+that do the same thing will always produce the **same structural hash**, regardless of what they are
+named, how they are formatted, or which language they are written in.
+
+This is based on **alpha equivalence** — a concept from lambda calculus (1936) that proves two
+expressions are logically identical if you can rename their variables and produce the same result.
+
+---
+""")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### Get started in 30 seconds")
+        st.markdown("""
+**Option 1 — Use the web app (no install)**
+
+1. Pick a tab above
+2. Upload your code files
+3. Hit the scan/run button
+4. That's it
+
+Native Python, JavaScript, and TypeScript scanning is completely free with no account needed.
 
 ---
 
-### The full pipeline
+**Option 2 — Run locally (free AI translation)**
 
+Run SIR Engine on your own machine to get free AI-powered scanning for C++, Java, Rust, Go, and 25+ other languages via Ollama:
+
+```bash
+git clone https://github.com/lflin00/SRI-ENGINE
+cd SRI-ENGINE/SIR_MAIN
+pip install streamlit
+ollama pull codellama:7b
+streamlit run sir_ui.py
+```
+
+Then open http://localhost:8501 in your browser. Ollama runs the AI translation locally — your code never leaves your machine.
+
+---
+
+**Option 3 — AI scanning on the web app**
+
+For C++, Java, Rust, and other languages on the live web app:
+1. Get a free API key at [console.anthropic.com](https://console.anthropic.com)
+2. Paste it in the sidebar on the left
+3. Select **Any Language (AI-powered)** in the Scan tab
+""")
+
+    with col2:
+        st.markdown("### What each tab does")
+        st.markdown("""
 | Tab | What it does |
 |-----|-------------|
-| **Scan** | Upload `.py` files → find structurally duplicate functions with syntax highlighting |
-| **Pack** | Upload `.py` files → compress into a `bundle.json` with size stats |
-| **Unpack** | Upload `bundle.json` → restore full files or individual functions |
-| **Verify** | Upload `bundle.json` + restored files → confirm hashes match |
-| **Diff** | Upload two sets of files → compare their logical structures |
-| **Merge** | Upload `.py` files → remove duplicates, get HTML report + clean zip |
+| **Scan** | Upload code files → find structurally duplicate functions. Supports Python, JS, TS, and 25+ languages via AI. |
+| **GitHub Scanner** | Paste any public GitHub repo URL → scan without downloading anything. |
+| **Pack** | Compress Python or JS/TS files into a deduplicated `bundle.json`. |
+| **Unpack** | Restore files from a bundle with original names rehydrated. |
+| **Verify** | Confirm restored files match the original structural hashes. |
+| **Diff** | Compare two codebases structurally — find shared logic, additions, removals. |
+| **Merge** | Find all duplicates, keep one canonical version, remove the rest, rename all call sites. |
 
 ---
 
-### How it works
+### How the health score works
 
-1. Your Python file is parsed into an AST (Abstract Syntax Tree)
-2. All identifiers are alpha-renamed to canonical placeholders (`v0`, `v1`, `f0`...)
-3. The resulting structure is hashed with SHA-256
-4. Identical hashes = identical logic, regardless of naming
+Every scan shows a **Health Score from 0 to 100**.
+
+```
+Health = (unique structures / total functions) × 100
+```
+
+100 means no duplicate logic anywhere.
+70 means 30% of your functions are structural duplicates.
+Lower scores mean more redundant code to clean up.
 
 ---
 
-### Built by
-Lucas Flinders — [GitHub](https://github.com/lflin00/SRI-ENGINE)
+### The .sir_ignore feature
+
+In any scan you can paste function names into the **.sir_ignore** box to skip them.
+Use this for intentional duplicates — functions you know are the same but want to keep separate.
+One name per line. Lines starting with # are treated as comments.
 
 ---
 
 ### VS Code Extension
 
-Install the SIR Engine extension to scan for duplicates directly in your editor — auto-scans on every save.
-    """)
+Scan for duplicates directly in your editor. Auto-scans every time you save a file.
+Shows health score in the status bar. Auto-merge with before/after diff preview — fully reversible with Cmd+Z.
+""")
+        st.link_button(
+            "📥 Download VS Code Extension (.vsix)",
+            "https://github.com/lflin00/SRI-ENGINE/raw/main/sir-engine-0.0.2.vsix"
+        )
+        st.caption("Install: open VS Code → Cmd+Shift+P → Install from VSIX → select the file.")
 
-st.link_button(
-    "📥 Download VS Code Extension (.vsix)",
-    "https://github.com/lflin00/SRI-ENGINE/raw/main/sir-engine-0.0.1.vsix"
-)
-st.caption("After downloading: open VS Code → Cmd+Shift+P → 'Install from VSIX' → select the file.")
+    st.divider()
+    st.markdown("### Language support")
+
+    lang_data = {
+        "Language": ["Python", "JavaScript", "TypeScript", "C", "C++", "Java", "Rust", "Go",
+                     "Ruby", "Swift", "Kotlin", "C#", "PHP", "Dart", "Lua", "Scala",
+                     "Haskell", "R", "Elixir", "OCaml", "F#", "Julia", "Nim", "Zig"],
+        "Scan": ["✓ Native"]*3 + ["✓ AI"]*21,
+        "Cross-language": ["✓"]*3 + ["✓ via AI"]*21,
+        "Pack/Unpack": ["✓"]*2 + ["✓"]*1 + ["Planned"]*21,
+    }
+    import pandas as pd
+    try:
+        st.dataframe(pd.DataFrame(lang_data), use_container_width=True, hide_index=True)
+    except Exception:
+        st.markdown("Python, JavaScript, TypeScript — native. C, C++, Java, Rust, Go, Ruby, Swift, Kotlin, C#, PHP, Dart, Lua, Scala, Haskell, R, and more — via AI translation.")
+
+    st.divider()
+    st.markdown("""
+### Limitations (AI translation layer)
+The AI translation layer for non-Python/JS/TS languages is powered by a language model.
+Results are highly reliable but not mathematically guaranteed like the native pipelines.
+Very complex language-specific features (C++ templates, Rust lifetimes, Java generics) may be simplified.
+Best for pure logic functions. Marked as *(AI translated)* in results so you always know which path was used.
+
+---
+**Built by Lucas Flinders** · [GitHub](https://github.com/lflin00/SRI-ENGINE) · [Live App](https://sri-engine-7amwtce7a23k7q34cpnxem.streamlit.app)
+""")
