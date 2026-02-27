@@ -20,6 +20,39 @@ from sir.core import encode, hash_source, decode_sir
 
 
 # ─────────────────────────────────────────────
+#  Environment detection
+# ─────────────────────────────────────────────
+
+def is_running_locally() -> bool:
+    """Detect if running on local machine vs Streamlit Cloud."""
+    import os
+    # Streamlit Cloud sets IS_CLOUD or STREAMLIT_SHARING_MODE
+    if os.environ.get("STREAMLIT_SHARING_MODE") or os.environ.get("IS_CLOUD"):
+        return False
+    # Check if localhost
+    try:
+        import socket
+        hostname = socket.gethostname()
+        if "streamlit" in hostname.lower() or "cloud" in hostname.lower():
+            return False
+    except Exception:
+        pass
+    return True
+
+IS_LOCAL = is_running_locally()
+
+
+def get_ai_config():
+    """Get AI backend config from session state."""
+    return {
+        "backend": st.session_state.get("ai_backend", "ollama" if IS_LOCAL else "anthropic"),
+        "api_key": st.session_state.get("ai_api_key", ""),
+        "ollama_model": st.session_state.get("ollama_model", "codellama:7b"),
+        "ollama_host": st.session_state.get("ollama_host", "http://localhost:11434"),
+    }
+
+
+# ─────────────────────────────────────────────
 #  Helpers
 # ─────────────────────────────────────────────
 
@@ -242,8 +275,47 @@ def get_function_source(source: str, func_name: str) -> str:
 # ─────────────────────────────────────────────
 
 st.set_page_config(page_title="SIR Engine", layout="wide", page_icon="🔍")
-st.title("🔍 SIR Engine")
-st.caption("Semantic duplicate detection, structural compression, and code diffing for Python.")
+
+with st.sidebar:
+    st.markdown("### AI Translation Engine")
+    if IS_LOCAL:
+        st.success("Running locally")
+        try:
+            from sir_ai_translate import check_ollama, get_ollama_models
+            if check_ollama():
+                models = get_ollama_models()
+                st.success("Ollama detected")
+                if models:
+                    st.selectbox("Model", models, key="ollama_model")
+                else:
+                    st.text_input("Model", value="codellama:7b", key="ollama_model")
+                    st.caption("Run: ollama pull codellama:7b")
+                st.text_input("Host", value="http://localhost:11434", key="ollama_host")
+                st.session_state["ai_backend"] = "ollama"
+                st.caption("AI translation is free via Ollama.")
+            else:
+                st.warning("Ollama not running")
+                st.caption("Install: ollama.ai then: ollama pull codellama:7b")
+                key = st.text_input("Anthropic API key", type="password", key="ai_api_key")
+                st.session_state["ai_backend"] = "anthropic" if key else "none"
+        except ImportError:
+            st.warning("sir_ai_translate.py not found")
+    else:
+        st.info("Running on Streamlit Cloud")
+        key = st.text_input("Anthropic API key", type="password", key="ai_api_key")
+        if key:
+            st.session_state["ai_backend"] = "anthropic"
+            st.success("API key set")
+        else:
+            st.session_state["ai_backend"] = "none"
+            st.caption("Native Python/JS/TS works without a key.")
+    st.divider()
+    st.markdown("**Run locally for free AI:**")
+    st.code("git clone https://github.com/lflin00/SRI-ENGINE\ncd SRI-ENGINE/SIR_MAIN\npip install streamlit\nollama pull codellama:7b\nstreamlit run sir_ui.py", language="bash")
+    st.markdown("[GitHub](https://github.com/lflin00/SRI-ENGINE)")
+
+st.title("SIR Engine")
+st.caption("Semantic duplicate detection for Python, JavaScript, TypeScript, and 25+ languages via AI translation.")
 
 tab_scan, tab_github, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
     "Scan", "GitHub Scanner", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
@@ -499,8 +571,12 @@ with tab_scan:
                 st.warning("Please upload at least one file.")
             else:
                 try:
-                    from sir_ai_translate import extract_any_functions, detect_language, is_ai_language, translate_to_python
+                    from sir_ai_translate import detect_language, is_ai_language, translate_to_python, extract_raw_functions
                     from sir.core import hash_source as _hash_source
+                    _ai_cfg = get_ai_config()
+                    if _ai_cfg["backend"] == "none":
+                        st.error("No AI backend configured. Set up Ollama or add an Anthropic API key in the sidebar.")
+                        st.stop()
 
                     ai_groups = defaultdict(list)
                     total_ai = 0
@@ -545,7 +621,13 @@ with tab_scan:
                                 for name, lineno, raw_src in raw_funcs:
                                     total_ai += 1
                                     try:
-                                        py_src = translate_to_python(raw_src, lang)
+                                        py_src = translate_to_python(
+                                            raw_src, lang,
+                                            backend=_ai_cfg["backend"],
+                                            api_key=_ai_cfg["api_key"],
+                                            ollama_model=_ai_cfg["ollama_model"],
+                                            ollama_host=_ai_cfg["ollama_host"]
+                                        )
                                         if py_src.strip():
                                             h = _hash_source(py_src, mode="semantic")
                                             ai_groups[h].append({"file": f.name, "name": name,
@@ -840,7 +922,16 @@ with tab_github:
                                     continue
                                 total_gh_funcs += 1
                                 try:
-                                    py_src = translate_to_python(raw_src, lang)
+                                    _cfg = get_ai_config()
+                                    if _cfg["backend"] == "none":
+                                        continue
+                                    py_src = translate_to_python(
+                                        raw_src, lang,
+                                        backend=_cfg["backend"],
+                                        api_key=_cfg["api_key"],
+                                        ollama_model=_cfg["ollama_model"],
+                                        ollama_host=_cfg["ollama_host"]
+                                    )
                                     if py_src.strip():
                                         h = hash_source(py_src, mode="semantic")
                                         gh_groups[h].append({
@@ -1076,7 +1167,65 @@ with tab_pack:
 with tab_unpack:
     st.subheader("Unpack: restore files from a SIR bundle")
 
-    unpack_mode = st.radio(
+    unpack_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript"], key="unpack_lang")
+
+    if unpack_lang == "JavaScript / TypeScript":
+        st.write("Upload a `bundle_js.json` produced by the JS/TS Pack tab. SIR restores all files with original names rehydrated.")
+        unpack_js_bundle = st.file_uploader("Upload bundle_js.json", type=["json"], key="unpack_js_bundle")
+        unpack_js_dedup = st.checkbox("Skip duplicate structures (write only unique functions)", value=True, key="unpack_js_dedup")
+
+        if st.button("Unpack JS/TS", type="primary"):
+            if not unpack_js_bundle:
+                st.warning("Please upload a bundle_js.json.")
+            else:
+                try:
+                    import re as _re
+                    bundle = json.loads(unpack_js_bundle.read().decode("utf-8"))
+                    roots = bundle.get("roots", [])
+                    namemaps = bundle.get("namemaps", {})
+                    canonical_store = bundle.get("canonical_store", {})
+
+                    by_file = defaultdict(list)
+                    for r in roots:
+                        by_file[r["file"]].append(r)
+
+                    zip_buffer = io.BytesIO()
+                    restored_files = 0
+                    seen_hashes = set()
+
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for rel_file, occs in by_file.items():
+                            lines = [f"// Restored by SIR Engine from {rel_file}\n\n"]
+                            for occ in sorted(occs, key=lambda x: x["lineno"]):
+                                h = occ["sir_sha256"]
+                                nm_entry = namemaps.get(occ.get("occurrence_key", ""), {})
+                                name_map = nm_entry.get("name_map", {})
+                                orig_params = nm_entry.get("original_params", [])
+                                canonical = canonical_store.get(h, {})
+                                body = canonical.get("body_src", "")
+                                for canon_name, orig_name in name_map.items():
+                                    body = _re.sub(rf'\b{_re.escape(canon_name)}\b', orig_name, body)
+                                params_str = ", ".join(orig_params)
+                                func_src = f"function {occ['name']}({params_str}) {body}\n\n"
+                                if unpack_js_dedup and h in seen_hashes:
+                                    lines.append(f"// DUPLICATE skipped: {occ['name']}\n\n")
+                                else:
+                                    lines.append(func_src)
+                                    seen_hashes.add(h)
+                            zf.writestr(rel_file, "".join(lines))
+                            restored_files += 1
+
+                    zip_buffer.seek(0)
+                    c1, c2 = st.columns(2)
+                    c1.metric("Files restored", restored_files)
+                    c2.metric("Unique structures written", len(seen_hashes))
+                    st.success("JS/TS unpack complete!")
+                    st.download_button("📥 Download restored JS/TS files (.zip)", data=zip_buffer,
+                                      file_name="restored_js.zip", mime="application/zip")
+                except Exception as e:
+                    st.error(f"Unpack failed: {e}")
+    else:
+        unpack_mode = st.radio(
         "Restore mode",
         ["🔧 Full file restore (fix duplicates, get original .py files back)",
          "🔬 Individual functions (one .py per function)"],
