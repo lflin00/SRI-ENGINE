@@ -75,6 +75,7 @@ class AlphaRenamer(ast.NodeTransformer):
         return new
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        node.name = "f"
         self._push_scope()
         node.args = self.visit(node.args)
         node.body = [self.visit(n) for n in node.body]
