@@ -621,13 +621,14 @@ with tab_scan:
                                 for name, lineno, raw_src in raw_funcs:
                                     total_ai += 1
                                     try:
-                                        py_src = translate_to_python(
+                                        _tr = translate_to_python(
                                             raw_src, lang,
                                             backend=_ai_cfg["backend"],
                                             api_key=_ai_cfg["api_key"],
                                             ollama_model=_ai_cfg["ollama_model"],
                                             ollama_host=_ai_cfg["ollama_host"]
                                         )
+                                        py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
                                         if py_src.strip():
                                             h = _hash_source(py_src, mode="semantic")
                                             ai_groups[h].append({"file": f.name, "name": name,
@@ -925,13 +926,14 @@ with tab_github:
                                     _cfg = get_ai_config()
                                     if _cfg["backend"] == "none":
                                         continue
-                                    py_src = translate_to_python(
+                                    _tr = translate_to_python(
                                         raw_src, lang,
                                         backend=_cfg["backend"],
                                         api_key=_cfg["api_key"],
                                         ollama_model=_cfg["ollama_model"],
                                         ollama_host=_cfg["ollama_host"]
                                     )
+                                    py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
                                     if py_src.strip():
                                         h = hash_source(py_src, mode="semantic")
                                         gh_groups[h].append({
@@ -1111,13 +1113,14 @@ with tab_pack:
                             for name, lineno, raw_src in raw_funcs:
                                 total_ai_pack += 1
                                 try:
-                                    py_src = translate_to_python(
+                                    _tr = translate_to_python(
                                         raw_src, lang,
                                         backend=_ai_cfg["backend"],
                                         api_key=_ai_cfg["api_key"],
                                         ollama_model=_ai_cfg["ollama_model"],
                                         ollama_host=_ai_cfg["ollama_host"]
                                     )
+                                    py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
                                     if py_src.strip():
                                         h = _hs(py_src, mode="semantic")
                                         occ_key = f"{f.name}::{name}::{lineno}"
@@ -1621,9 +1624,10 @@ with tab_verify:
                                 raw_funcs = extract_raw_functions(src, lang)
                                 for name, lineno, raw_src in raw_funcs:
                                     try:
-                                        py_src = translate_to_python(raw_src, lang, backend=_ai_cfg["backend"],
+                                        _tr = translate_to_python(raw_src, lang, backend=_ai_cfg["backend"],
                                             api_key=_ai_cfg["api_key"], ollama_model=_ai_cfg["ollama_model"],
                                             ollama_host=_ai_cfg["ollama_host"])
+                                        py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
                                         if py_src.strip():
                                             actual.add(_hs(py_src, mode="semantic"))
                                     except Exception:
@@ -1794,9 +1798,10 @@ with tab_diff:
                                     lang = detect_language(f.name) or ext.upper()
                                     for name, lineno, raw_src in extract_raw_functions(src, lang):
                                         try:
-                                            py_src = translate_to_python(raw_src, lang, backend=_ai_cfg["backend"],
+                                            _tr = translate_to_python(raw_src, lang, backend=_ai_cfg["backend"],
                                                 api_key=_ai_cfg["api_key"], ollama_model=_ai_cfg["ollama_model"],
                                                 ollama_host=_ai_cfg["ollama_host"])
+                                            py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
                                             if py_src.strip():
                                                 groups[_hs(py_src, mode="semantic")].append(f"{f.name}::{name}")
                                         except Exception: pass
@@ -2062,13 +2067,14 @@ with tab_merge:
                                 for name, lineno, raw_src in raw_funcs:
                                     total_ai_merge += 1
                                     try:
-                                        py_src = translate_to_python(
+                                        _tr = translate_to_python(
                                             raw_src, lang,
                                             backend=_ai_cfg["backend"],
                                             api_key=_ai_cfg["api_key"],
                                             ollama_model=_ai_cfg["ollama_model"],
                                             ollama_host=_ai_cfg["ollama_host"]
                                         )
+                                        py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
                                         if py_src.strip():
                                             h = _hs(py_src, mode="semantic")
                                             entry = {"file": f.name, "name": name, "lineno": lineno,
