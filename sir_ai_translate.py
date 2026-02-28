@@ -194,7 +194,10 @@ def validate_python(code: str) -> Tuple[bool, str]:
 
 def clean_translation(raw: str) -> str:
     """Strip markdown artifacts and find the first function definition."""
-    raw = re.sub(r'```\w*\n?', '', raw).strip()
+    # Remove all code fence variations: ```python, ```py, ```, ` etc.
+    raw = re.sub(r'```[\w]*', '', raw)
+    raw = re.sub(r'`', '', raw)
+    raw = raw.strip()
     lines = raw.splitlines()
     # Find where the first def starts
     for i, line in enumerate(lines):
