@@ -188,6 +188,55 @@ def extract_python_functions(source: str) -> List[Tuple[str, int, str]]:
 
 
 # ─────────────────────────────────────────────
+#  JS/TS function extraction
+# ─────────────────────────────────────────────
+
+def _try_import_sir_js():
+    """Try to import sir_js.py from standard locations."""
+    here = Path(__file__).parent
+    candidates = [here, here / "SIR_MAIN", here.parent / "SIR_MAIN"]
+    for c in candidates:
+        if (c / "sir_js.py").exists():
+            sys.path.insert(0, str(c))
+            try:
+                from sir_js import hash_js_source
+                return hash_js_source
+            except ImportError:
+                pass
+    return None
+
+
+def extract_js_hashes(source: str, filename: str):
+    hash_js_source = _try_import_sir_js()
+    if not hash_js_source:
+        return []
+    try:
+        return hash_js_source(source, filename)
+    except Exception:
+        return []
+
+
+def extract_functions_universal(f, root):
+    """Returns (name, lineno, hash, lang) for any supported file."""
+    ext = f.suffix.lower()
+    source = f.read_text(encoding="utf-8", errors="ignore")
+    rel = str(f.relative_to(root) if root.is_dir() else f.name)
+    results = []
+    if ext == ".py":
+        for name, lineno, src in extract_python_functions(source):
+            h = _hash_python(src)
+            if h:
+                results.append((name, lineno, h, "Python"))
+    elif ext in {".js", ".jsx"}:
+        for name, lineno, h in extract_js_hashes(source, rel):
+            results.append((name, lineno, h, "JavaScript"))
+    elif ext in {".ts", ".tsx"}:
+        for name, lineno, h in extract_js_hashes(source, rel):
+            results.append((name, lineno, h, "TypeScript"))
+    return results
+
+
+# ─────────────────────────────────────────────
 #  Health score
 # ─────────────────────────────────────────────
 
@@ -214,7 +263,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if root.is_file():
         files = [root]
     else:
-        files = discover_files(root, PY_EXTS, recursive=not args.no_recurse)
+        files = discover_files(root, PY_EXTS | JS_EXTS, recursive=not args.no_recurse)
 
     if not files:
         warn("No Python files found.")
@@ -229,19 +278,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     for f in files:
         try:
-            source = f.read_text(encoding="utf-8", errors="ignore")
-            funcs = extract_python_functions(source)
-            for name, lineno, src in funcs:
+            for name, lineno, h, lang in extract_functions_universal(f, root):
                 total_functions += 1
-                h = _hash_python(src)
-                if h:
-                    hash_groups[h].append({
-                        "file": str(f.relative_to(root) if root.is_dir() else f.name),
-                        "name": name,
-                        "lineno": lineno,
-                    })
-                else:
-                    errors += 1
+                rel = str(f.relative_to(root) if root.is_dir() else f.name)
+                hash_groups[h].append({
+                    "file": rel,
+                    "name": name,
+                    "lineno": lineno,
+                    "lang": lang,
+                })
         except Exception as e:
             errors += 1
 
@@ -273,7 +318,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
             print(f"  {_c('●', RED)}  {len(occurrences)} copies  {_c(h[:16] + '...', DIM)}")
             for o in occurrences:
                 lineno_str = f"line {o['lineno']}"
-                print(f"     {_c(o['name'], CYAN)}  in  {_c(o['file'], BOLD)}  {_c(lineno_str, DIM)}")
+                lang_badge = _c(f"[{o.get('lang', '')}]", DIM) if o.get('lang') else ""
+                print(f"     {_c(o['name'], CYAN)}  {lang_badge}  {_c(o['file'], BOLD)}  {_c(lineno_str, DIM)}")
     else:
         print()
         ok("No duplicate functions found.")
@@ -314,7 +360,7 @@ def cmd_health(args: argparse.Namespace) -> int:
         err(f"Path not found: {root}")
         return 1
 
-    files = [root] if root.is_file() else discover_files(root, PY_EXTS)
+    files = [root] if root.is_file() else discover_files(root, PY_EXTS | JS_EXTS)
     hash_groups: Dict[str, List] = defaultdict(list)
     total = 0
 
@@ -494,7 +540,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
     def get_hashes(root: Path) -> Dict[str, str]:
         """Returns {hash: function_name} for all functions in root."""
         result = {}
-        files = [root] if root.is_file() else discover_files(root, PY_EXTS)
+        files = [root] if root.is_file() else discover_files(root, PY_EXTS | JS_EXTS)
         for f in files:
             try:
                 source = f.read_text(encoding="utf-8", errors="ignore")
