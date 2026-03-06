@@ -388,6 +388,13 @@ with tab_scan:
 
                 dupes = {h: occ for h, occ in groups.items() if len(occ) >= int(min_cluster)}
                 health = int(100 * len(groups) / max(total_funcs, 1))
+                st.session_state["scan_sources"] = scan_sources
+                st.session_state["scan_dupes"] = dupes
+                st.session_state["scan_func_code_map"] = func_code_map
+                st.session_state["scan_health"] = health
+                st.session_state["scan_total_funcs"] = total_funcs
+                st.session_state["scan_groups_count"] = len(groups)
+                st.session_state["scan_uploaded_count"] = len(uploaded)
 
                 c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Files", len(uploaded))
@@ -433,6 +440,116 @@ with tab_scan:
                 }
                 st.download_button("📥 Download report (JSON)", data=json.dumps(report, indent=2),
                                    file_name="sir_report.json", mime="application/json")
+
+
+
+    # ── MERGE SECTION (Python scan) ───────────────
+    if scan_lang == "Python (.py)" and "scan_sources" in st.session_state and "scan_dupes" in st.session_state:
+        _scan_sources = st.session_state["scan_sources"]
+        _dupes = st.session_state["scan_dupes"]
+        if _dupes:
+            import ast as _ast, zipfile, io
+            st.divider()
+            st.markdown("### 🔀 Merge Duplicates")
+            merge_col1, merge_col2 = st.columns([1, 3])
+            with merge_col1:
+                if st.button("⚡ Auto merge all", type="primary", key="auto_merge_py"):
+                    modified = {fname: src for fname, src in _scan_sources.items()}
+                    removed_count = 0
+                    # Collect all removals per file, then sort by line number descending
+                    # so removing from bottom up keeps line numbers stable
+                    removals_by_file = {}
+                    for h, occs in _dupes.items():
+                        for occ in occs[1:]:
+                            fname = occ.file
+                            if fname not in removals_by_file:
+                                removals_by_file[fname] = []
+                            removals_by_file[fname].append(occ)
+                    for fname, occ_list in removals_by_file.items():
+                        if fname not in modified:
+                            continue
+                        # Sort by lineno descending so we remove from bottom first
+                        occ_list.sort(key=lambda o: o.lineno, reverse=True)
+                        for occ in occ_list:
+                            try:
+                                src = modified[fname]
+                                tree = _ast.parse(src)
+                                lines = src.splitlines()
+                                for node in _ast.walk(tree):
+                                    if (isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                                            and node.name == occ.qualname.split(".")[-1]):
+                                        new_lines = lines[:node.lineno-1] + lines[node.end_lineno:]
+                                        modified[fname] = "\n".join(new_lines)
+                                        removed_count += 1
+                                        break
+                            except Exception:
+                                pass
+                    zip_buf = io.BytesIO()
+                    with zipfile.ZipFile(zip_buf, "w") as zf:
+                        for fname, src in modified.items():
+                            zf.writestr(fname, src)
+                    zip_buf.seek(0)
+                    st.session_state["auto_merge_zip"] = zip_buf.getvalue()
+                    st.session_state["auto_merge_count"] = removed_count
+            with merge_col2:
+                st.caption("Keeps the first occurrence of each duplicate and removes all others.")
+
+            if "auto_merge_zip" in st.session_state:
+                st.success(f"Auto merge complete — removed {st.session_state['auto_merge_count']} duplicate function(s).")
+                st.download_button(
+                    "📥 Download merged files",
+                    data=st.session_state["auto_merge_zip"],
+                    file_name="sir_automerged.zip",
+                    mime="application/zip",
+                    key="dl_auto_merge"
+                )
+
+            st.markdown("#### Manual merge — choose which function to keep")
+            for h, occs in sorted(_dupes.items(), key=lambda x: (-len(x[1]), x[0])):
+                with st.expander(f"🔀 Merge cluster: {len(occs)} duplicates — `{h[:16]}...`", expanded=False):
+                    keep_options = [f"{o.qualname} ({o.file} line {o.lineno})" for o in occs]
+                    keep_choice = st.selectbox("Keep which function?", keep_options, key=f"manual_keep_{h}")
+                    keep_idx = keep_options.index(keep_choice)
+                    if st.button("Apply merge", key=f"manual_merge_{h}"):
+                        kept = occs[keep_idx]
+                        to_remove = [o for i, o in enumerate(occs) if i != keep_idx]
+                        modified = {fname: src for fname, src in _scan_sources.items()}
+                        removed = 0
+                        to_remove.sort(key=lambda o: o.lineno, reverse=True)
+                        for occ in to_remove:
+                            fname = occ.file
+                            if fname not in modified:
+                                continue
+                            try:
+                                src = modified[fname]
+                                tree = _ast.parse(src)
+                                lines = src.splitlines()
+                                for node in _ast.walk(tree):
+                                    if (isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                                            and node.name == occ.qualname.split(".")[-1]):
+                                        new_lines = lines[:node.lineno-1] + lines[node.end_lineno:]
+                                        modified[fname] = "\n".join(new_lines)
+                                        removed += 1
+                                        break
+                            except Exception:
+                                pass
+                        zip_buf = io.BytesIO()
+                        with zipfile.ZipFile(zip_buf, "w") as zf:
+                            for fname, src in modified.items():
+                                zf.writestr(fname, src)
+                        zip_buf.seek(0)
+                        st.session_state[f"manual_zip_{h}"] = zip_buf.getvalue()
+                        st.session_state[f"manual_kept_{h}"] = kept.qualname
+                        st.session_state[f"manual_removed_{h}"] = removed
+                    if f"manual_zip_{h}" in st.session_state:
+                        st.success(f"Kept `{st.session_state[f'manual_kept_{h}']}` — removed {st.session_state[f'manual_removed_{h}']} duplicate(s).")
+                        st.download_button(
+                            "📥 Download merged files",
+                            data=st.session_state[f"manual_zip_{h}"],
+                            file_name=f"sir_merged_{h[:8]}.zip",
+                            mime="application/zip",
+                            key=f"dl_manual_{h}"
+                        )
 
     # ── JAVASCRIPT SCAN ───────────────────────────
     elif scan_lang == "JavaScript (.js / .jsx)":
