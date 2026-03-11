@@ -317,8 +317,8 @@ with st.sidebar:
 st.title("SIR Engine")
 st.caption("Semantic duplicate detection for Python, JavaScript, TypeScript, and 25+ languages via AI translation.")
 
-tab_scan, tab_github, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
-    "Scan", "GitHub Scanner", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
+tab_scan, tab_class_scan, tab_github, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
+    "Scan", "Class Scan", "GitHub Scanner", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
 ])
 
 
@@ -876,6 +876,144 @@ with tab_scan:
 
 
 # ─────────────────────────────────────────────
+#  CLASS SCAN (V2)
+# ─────────────────────────────────────────────
+
+with tab_class_scan:
+    st.subheader("Class Scan: find structurally duplicate classes (V2 engine)")
+    st.write(
+        "Upload `.py` files — SIR V2 hashes each class using a Merkle tree over its methods. "
+        "Two classes with identical logic but different names, variable names, or method order will produce the same hash."
+    )
+
+    try:
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+        from sir2_core import extract_classes as _extract_classes, scan_for_class_dupes as _scan_for_class_dupes
+        _sir2_available = True
+    except ImportError:
+        _sir2_available = False
+
+    if not _sir2_available:
+        st.error("sir2_core.py not found — make sure it is in the same directory as sir_ui.py.")
+    else:
+        cs_uploaded = st.file_uploader(
+            "Upload Python files",
+            type=["py"],
+            accept_multiple_files=True,
+            key="class_scan_upload",
+        )
+
+        cs_col1, cs_col2 = st.columns(2)
+        with cs_col1:
+            cs_min_sim = st.slider(
+                "Similarity threshold",
+                min_value=0.0, max_value=1.0, value=1.0, step=0.05,
+                help="1.0 = exact duplicates only. Lower values also find partial matches.",
+                key="cs_min_sim",
+            )
+        with cs_col2:
+            cs_inheritance = st.checkbox(
+                "Inheritance-aware hashing",
+                value=True,
+                help="Fold parent class hashes into child hashes (Merkle inheritance). "
+                     "Two classes with the same methods but different parents will NOT match.",
+                key="cs_inheritance",
+            )
+
+        if st.button("Scan for class duplicates", key="cs_run") and cs_uploaded:
+            file_sources: Dict[str, str] = {}
+            for uf in cs_uploaded:
+                try:
+                    file_sources[uf.name] = uf.read().decode("utf-8", errors="replace")
+                except Exception as e:
+                    st.warning(f"Could not read {uf.name}: {e}")
+
+            if not file_sources:
+                st.warning("No files to scan.")
+            else:
+                with st.spinner("Hashing classes…"):
+                    all_classes = []
+                    for fname, src in file_sources.items():
+                        all_classes.extend(_extract_classes(src, fname))
+
+                if not all_classes:
+                    st.info("No classes with methods found in the uploaded files.")
+                else:
+                    exact_clusters, similar_pairs = _scan_for_class_dupes(
+                        all_classes,
+                        min_similarity=cs_min_sim,
+                        apply_inheritance=cs_inheritance,
+                    )
+
+                    # ── Summary metrics ──
+                    total_cls = len(all_classes)
+                    dup_cls = sum(len(c.members) for c in exact_clusters)
+                    health = max(0, round((1 - dup_cls / total_cls) * 100)) if total_cls else 100
+
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Classes found", total_cls)
+                    m2.metric("Exact clusters", len(exact_clusters))
+                    m3.metric("Similar pairs", len(similar_pairs))
+                    health_color = "normal" if health >= 80 else "off"
+                    m4.metric("Health", f"{health}/100", delta=None)
+
+                    # ── Hash table ──
+                    with st.expander("Class hash table", expanded=False):
+                        for cls in all_classes:
+                            methods_str = ", ".join(m.name for m in cls.methods)
+                            st.code(
+                                f"{cls.name:30s} ({cls.file})  "
+                                f"hash: {cls.class_hash[:20]}  "
+                                f"methods: [{methods_str}]",
+                                language=None,
+                            )
+
+                    # ── Exact duplicate clusters ──
+                    if exact_clusters:
+                        st.markdown(f"### Exact duplicate classes — {len(exact_clusters)} cluster(s)")
+                        for cluster in sorted(exact_clusters, key=lambda c: -len(c.members)):
+                            names = " · ".join(
+                                f"`{cls.name}` ({cls.file} line {cls.lineno})"
+                                for cls in cluster.members
+                            )
+                            with st.expander(
+                                f"🔴 {len(cluster.members)} copies — {cluster.class_hash[:20]}…",
+                                expanded=True,
+                            ):
+                                for cls in cluster.members:
+                                    methods_str = ", ".join(m.name for m in cls.methods)
+                                    st.markdown(
+                                        f"**`{cls.name}`** — `{cls.file}` line {cls.lineno}  \n"
+                                        f"Methods: `{methods_str}`"
+                                    )
+                    else:
+                        st.success("No exact duplicate classes found.")
+
+                    # ── Similar pairs ──
+                    if similar_pairs:
+                        st.markdown(f"### Similar class pairs — {len(similar_pairs)} found (≥ {cs_min_sim:.0%})")
+                        for pair in similar_pairs:
+                            shared = [a.name for a, _ in pair.matching_methods]
+                            only_a = [m.name for m in pair.only_in_a]
+                            only_b = [m.name for m in pair.only_in_b]
+                            label = (
+                                f"🟡 {pair.similarity:.0%} similar — "
+                                f"`{pair.class_a.name}` ({pair.class_a.file}) vs "
+                                f"`{pair.class_b.name}` ({pair.class_b.file})"
+                            )
+                            with st.expander(label, expanded=False):
+                                if shared:
+                                    st.markdown(f"**Shared methods:** {', '.join(f'`{m}`' for m in shared)}")
+                                if only_a:
+                                    st.markdown(f"**Only in `{pair.class_a.name}`:** {', '.join(f'`{m}`' for m in only_a)}")
+                                if only_b:
+                                    st.markdown(f"**Only in `{pair.class_b.name}`:** {', '.join(f'`{m}`' for m in only_b)}")
+                    elif cs_min_sim < 1.0:
+                        st.info(f"No similar class pairs found at ≥ {cs_min_sim:.0%} similarity.")
+
+
+# ─────────────────────────────────────────────
 #  GITHUB SCANNER
 # ─────────────────────────────────────────────
 
@@ -936,7 +1074,9 @@ with tab_github:
                                    ".c", ".cpp", ".cc", ".java", ".rs", ".go",
                                    ".rb", ".php", ".swift", ".kt", ".cs", ".lua", ".dart")
                 else:
-                    target_exts = (".py", ".js", ".jsx", ".ts", ".tsx")
+                    target_exts = (".py", ".js", ".jsx", ".ts", ".tsx",
+                                   ".java", ".rs", ".go", ".c", ".cpp", ".cc",
+                                   ".rb", ".php", ".swift", ".kt", ".cs", ".lua", ".dart")
 
                 status = st.empty()
                 progress = st.progress(0, text="Fetching file tree from GitHub...")
@@ -1031,35 +1171,72 @@ with tab_github:
                                     })
                                 except Exception:
                                     pass
-                        elif "AI-powered" in gh_lang:
-                            from sir_ai_translate import detect_language, extract_raw_functions, translate_to_python
-                            lang = detect_language(fpath) or fpath.rsplit(".", 1)[-1].upper()
-                            raw_funcs = extract_raw_functions(src, lang)
-                            for name, lineno, raw_src in raw_funcs:
-                                if name in ignored_names:
-                                    continue
-                                total_gh_funcs += 1
-                                try:
-                                    _cfg = get_ai_config()
-                                    if _cfg["backend"] == "none":
+                        else:
+                            # Any other language (Java, Rust, Go, C++, etc.) — route through AI translation
+                            try:
+                                from sir_ai_translate import detect_language, extract_raw_functions, translate_to_python
+                                lang = detect_language(fpath) or fpath.rsplit(".", 1)[-1].upper()
+                                raw_funcs = extract_raw_functions(src, lang)
+                                _cfg = get_ai_config()
+                                if _cfg["backend"] == "none":
+                                    st.warning(f"⚠️ {fpath} is a {lang} file — AI backend required to scan it. Configure an AI backend in the sidebar.", icon="🤖")
+                                else:
+                                    for name, lineno, raw_src in raw_funcs:
+                                        if name in ignored_names:
+                                            continue
+                                        total_gh_funcs += 1
+                                        try:
+                                            _tr = translate_to_python(
+                                                raw_src, lang,
+                                                backend=_cfg["backend"],
+                                                api_key=_cfg["api_key"],
+                                                ollama_model=_cfg["ollama_model"],
+                                                ollama_host=_cfg["ollama_host"]
+                                            )
+                                            py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
+                                            if py_src.strip():
+                                                h = hash_source(py_src, mode="semantic")
+                                                gh_groups[h].append({
+                                                    "file": fpath, "name": name,
+                                                    "lineno": lineno, "lang": lang,
+                                                    "code": raw_src, "translated": True
+                                                })
+                                        except Exception:
+                                            errors_gh += 1
+                            except Exception:
+                                errors_gh += 1
+                        if "AI-powered" in gh_lang:
+                            try:
+                                from sir_ai_translate import detect_language, extract_raw_functions, translate_to_python
+                                lang = detect_language(fpath) or fpath.rsplit(".", 1)[-1].upper()
+                                raw_funcs = extract_raw_functions(src, lang)
+                                for name, lineno, raw_src in raw_funcs:
+                                    if name in ignored_names:
                                         continue
-                                    _tr = translate_to_python(
-                                        raw_src, lang,
-                                        backend=_cfg["backend"],
-                                        api_key=_cfg["api_key"],
-                                        ollama_model=_cfg["ollama_model"],
-                                        ollama_host=_cfg["ollama_host"]
-                                    )
-                                    py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
-                                    if py_src.strip():
-                                        h = hash_source(py_src, mode="semantic")
-                                        gh_groups[h].append({
-                                            "file": fpath, "name": name,
-                                            "lineno": lineno, "lang": lang,
-                                            "code": raw_src, "translated": True
-                                        })
-                                except Exception:
-                                    pass
+                                    total_gh_funcs += 1
+                                    try:
+                                        _cfg = get_ai_config()
+                                        if _cfg["backend"] == "none":
+                                            continue
+                                        _tr = translate_to_python(
+                                            raw_src, lang,
+                                            backend=_cfg["backend"],
+                                            api_key=_cfg["api_key"],
+                                            ollama_model=_cfg["ollama_model"],
+                                            ollama_host=_cfg["ollama_host"]
+                                        )
+                                        py_src = _tr.get("python_src", "") if isinstance(_tr, dict) else _tr
+                                        if py_src.strip():
+                                            h = hash_source(py_src, mode="semantic")
+                                            gh_groups[h].append({
+                                                "file": fpath, "name": name,
+                                                "lineno": lineno, "lang": lang,
+                                                "code": raw_src, "translated": True
+                                            })
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                errors_gh += 1
                     except Exception:
                         errors_gh += 1
 
@@ -2492,6 +2669,7 @@ For C++, Java, Rust, and other languages on the live web app:
 | Tab | What it does |
 |-----|-------------|
 | **Scan** | Upload code files → find structurally duplicate functions. Supports Python, JS, TS, and 25+ languages via AI. |
+| **Class Scan** | Upload Python files → find duplicate classes using Merkle hashing (V2 engine). Detects exact and partial class duplicates. |
 | **GitHub Scanner** | Paste any public GitHub repo URL → scan without downloading anything. |
 | **Pack** | Compress Python or JS/TS files into a deduplicated `bundle.json`. |
 | **Unpack** | Restore files from a bundle with original names rehydrated. |
