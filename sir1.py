@@ -137,6 +137,11 @@ class AlphaRenamer(ast.NodeTransformer):
         node.name = self._enter_function(orig_name)
 
         node.args = self.visit(node.args)
+        # Register the function's own name in its local scope after args so
+        # recursive calls in the body get the same canonical name (e.g. f0).
+        # Only add if not already taken by a same-named parameter.
+        if orig_name not in self.scope_stack[-1]:
+            self.scope_stack[-1][orig_name] = node.name
         node.body = [self.visit(n) for n in node.body]
         node.decorator_list = [self.visit(n) for n in node.decorator_list]
         node.returns = self.visit(node.returns) if node.returns else None
@@ -149,6 +154,9 @@ class AlphaRenamer(ast.NodeTransformer):
         node.name = self._enter_function(orig_name)
 
         node.args = self.visit(node.args)
+        # Same recursive-call fix as visit_FunctionDef.
+        if orig_name not in self.scope_stack[-1]:
+            self.scope_stack[-1][orig_name] = node.name
         node.body = [self.visit(n) for n in node.body]
         node.decorator_list = [self.visit(n) for n in node.decorator_list]
         node.returns = self.visit(node.returns) if node.returns else None
@@ -197,6 +205,33 @@ class AlphaRenamer(ast.NodeTransformer):
         node.target = self.visit(node.target)
         node.iter = self.visit(node.iter)
         node.ifs = [self.visit(i) for i in node.ifs]
+        return node
+
+    # Comprehension visitors must process generators before elt/key/value so
+    # that iteration variables (e.g. `n` in `[n for n in xs]`) are allocated
+    # in the local scope before the output expression is visited.
+    # Without these, generic_visit visits `elt` first (field order in the AST),
+    # leaving iteration variables unrecognised and uncanonicalised.
+
+    def visit_ListComp(self, node: ast.ListComp) -> Any:
+        node.generators = [self.visit(g) for g in node.generators]
+        node.elt = self.visit(node.elt)
+        return node
+
+    def visit_SetComp(self, node: ast.SetComp) -> Any:
+        node.generators = [self.visit(g) for g in node.generators]
+        node.elt = self.visit(node.elt)
+        return node
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> Any:
+        node.generators = [self.visit(g) for g in node.generators]
+        node.elt = self.visit(node.elt)
+        return node
+
+    def visit_DictComp(self, node: ast.DictComp) -> Any:
+        node.generators = [self.visit(g) for g in node.generators]
+        node.key = self.visit(node.key)
+        node.value = self.visit(node.value)
         return node
 
 

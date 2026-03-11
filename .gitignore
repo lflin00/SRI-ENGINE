@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .sir_cache.json
+.sir_cache/
 .sir_pack*/
 bench/raw/
 bench/global_*
@@ -9,3 +10,4 @@ bench/global_*
 *.zst
 restored_*/
 *.sir.json
+*_backup.py

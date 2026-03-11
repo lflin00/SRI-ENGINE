@@ -191,6 +191,21 @@ def extract_python_functions(source: str) -> List[Tuple[str, int, str]]:
 #  JS/TS function extraction
 # ─────────────────────────────────────────────
 
+def _try_import_sir2():
+    """Try to import sir2_core.py from standard locations."""
+    here = Path(__file__).parent
+    candidates = [here, here / "SIR_MAIN", here.parent / "SIR_MAIN"]
+    for c in candidates:
+        if (c / "sir2_core.py").exists():
+            sys.path.insert(0, str(c))
+            try:
+                from sir2_core import extract_classes, scan_for_class_dupes
+                return extract_classes, scan_for_class_dupes
+            except ImportError:
+                pass
+    return None, None
+
+
 def _try_import_sir_js():
     """Try to import sir_js.py from standard locations."""
     here = Path(__file__).parent
@@ -520,6 +535,148 @@ def cmd_ai_scan(args: argparse.Namespace) -> int:
 
 
 # ─────────────────────────────────────────────
+#  class-scan command
+# ─────────────────────────────────────────────
+
+def cmd_class_scan(args: argparse.Namespace) -> int:
+    """Scan Python files for class-level semantic duplicates using the V2 engine."""
+    extract_classes, scan_for_class_dupes = _try_import_sir2()
+    if not extract_classes:
+        err("sir2_core.py not found. Make sure it's in the same directory.")
+        return 1
+
+    root = Path(args.path).expanduser().resolve()
+    if not root.exists():
+        err(f"Path not found: {root}")
+        return 1
+
+    header(f"SIR Engine V2 — Class Scan  {root.name}/")
+
+    files = [root] if root.is_file() else discover_files(root, PY_EXTS, recursive=not args.no_recurse)
+    if not files:
+        warn("No Python files found.")
+        return 0
+
+    info(f"Found {len(files)} Python file(s)")
+
+    file_sources: Dict[str, str] = {}
+    for f in files:
+        try:
+            rel = str(f.relative_to(root) if root.is_dir() else f.name)
+            file_sources[rel] = f.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            pass
+
+    all_classes = []
+    for fname, src in file_sources.items():
+        all_classes.extend(extract_classes(src, fname))
+
+    if not all_classes:
+        warn("No classes with methods found.")
+        return 0
+
+    info(f"Found {len(all_classes)} class(es) with methods")
+
+    exact_clusters, similar_pairs = scan_for_class_dupes(
+        all_classes,
+        min_similarity=args.min_similarity,
+        apply_inheritance=not args.no_inheritance,
+    )
+
+    # Summary
+    print()
+    dup_count = sum(len(c.members) for c in exact_clusters)
+    health = compute_health(len(all_classes), dup_count)
+    cols = [
+        ("Classes found",   str(len(all_classes))),
+        ("Exact clusters",  str(len(exact_clusters))),
+        ("Similar pairs",   str(len(similar_pairs))),
+        ("Health",          f"{health}/100"),
+    ]
+    for label, value in cols:
+        colour = GREEN if label == "Health" and health >= 80 else \
+                 YELLOW if label == "Health" and health >= 60 else \
+                 RED if label == "Health" else BOLD
+        print(f"  {_c(label, DIM):<22} {_c(value, colour)}")
+
+    # Exact duplicate clusters
+    if exact_clusters:
+        print()
+        print(_c(f"  Exact duplicate classes ({len(exact_clusters)} cluster(s)):", BOLD))
+        for cluster in sorted(exact_clusters, key=lambda c: -len(c.members)):
+            print()
+            print(f"  {_c('●', RED)}  {len(cluster.members)} copies  {_c(cluster.class_hash[:16] + '...', DIM)}")
+            for cls in cluster.members:
+                methods = ", ".join(m.name for m in cls.methods)
+                print(f"     {_c(cls.name, CYAN)}  {_c(cls.file, BOLD)}  line {cls.lineno}")
+                print(f"       {_c('methods:', DIM)} {methods}")
+    else:
+        print()
+        ok("No exact duplicate classes found.")
+
+    # Partial similarity pairs
+    if similar_pairs:
+        print()
+        print(_c(f"  Similar class pairs ({len(similar_pairs)} found, >= {args.min_similarity:.0%}):", BOLD))
+        for pair in similar_pairs:
+            pct = f"{pair.similarity:.0%}"
+            print()
+            print(f"  {_c('◑', YELLOW)}  {pct} similar  —  "
+                  f"{_c(pair.class_a.name, CYAN)} ({pair.class_a.file})  vs  "
+                  f"{_c(pair.class_b.name, CYAN)} ({pair.class_b.file})")
+            shared = [a.name for a, _ in pair.matching_methods]
+            only_a = [m.name for m in pair.only_in_a]
+            only_b = [m.name for m in pair.only_in_b]
+            if shared:
+                print(f"     {_c('shared:', DIM)} {', '.join(shared)}")
+            if only_a:
+                print(f"     {_c(f'only in {pair.class_a.name}:', DIM)} {', '.join(only_a)}")
+            if only_b:
+                print(f"     {_c(f'only in {pair.class_b.name}:', DIM)} {', '.join(only_b)}")
+
+    # Optional JSON report
+    if args.output:
+        report = {
+            "scanned_path": str(root),
+            "total_classes": len(all_classes),
+            "exact_clusters": len(exact_clusters),
+            "similar_pairs": len(similar_pairs),
+            "health_score": health,
+            "exact": [
+                {
+                    "class_hash": c.class_hash,
+                    "members": [
+                        {"name": m.name, "file": m.file, "lineno": m.lineno,
+                         "methods": [mth.name for mth in m.methods]}
+                        for m in c.members
+                    ],
+                }
+                for c in exact_clusters
+            ],
+            "similar": [
+                {
+                    "class_a": {"name": p.class_a.name, "file": p.class_a.file},
+                    "class_b": {"name": p.class_b.name, "file": p.class_b.file},
+                    "similarity": round(p.similarity, 4),
+                    "shared_methods": [a.name for a, _ in p.matching_methods],
+                    "only_in_a": [m.name for m in p.only_in_a],
+                    "only_in_b": [m.name for m in p.only_in_b],
+                }
+                for p in similar_pairs
+            ],
+        }
+        Path(args.output).write_text(json.dumps(report, indent=2))
+        ok(f"Report saved to {args.output}")
+
+    if args.strict and (exact_clusters or similar_pairs):
+        print()
+        err(f"Strict mode: {len(exact_clusters)} exact cluster(s), {len(similar_pairs)} similar pair(s) found.")
+        return 1
+
+    return 0
+
+
+# ─────────────────────────────────────────────
 #  diff command
 # ─────────────────────────────────────────────
 
@@ -603,6 +760,8 @@ Examples:
   sir scan ./my_project
   sir scan ./my_project --min 3 --output report.json
   sir scan ./my_project --strict
+  sir class-scan ./my_project
+  sir class-scan ./my_project --min-similarity 0.7
   sir ai-scan ./my_project --backend ollama --model codellama:7b
   sir health ./my_project
   sir diff ./v1 ./v2
@@ -642,6 +801,21 @@ Examples:
     p_ai.add_argument("--strict", action="store_true",
                       help="Exit with code 1 if duplicates found (for CI/CD)")
     p_ai.set_defaults(func=cmd_ai_scan)
+
+    # ── class-scan ─────────────────────────────
+    p_class = sub.add_parser("class-scan", help="Scan Python files for duplicate classes (V2 engine)")
+    p_class.add_argument("path", help="File or directory to scan")
+    p_class.add_argument("--min-similarity", type=float, default=1.0, metavar="F",
+                         help="Similarity threshold 0.0–1.0 for partial matches (default: 1.0 = exact only)")
+    p_class.add_argument("--no-inheritance", action="store_true",
+                         help="Disable inheritance-aware Merkle hashing")
+    p_class.add_argument("--output", "-o", metavar="FILE",
+                         help="Save JSON report to FILE")
+    p_class.add_argument("--strict", action="store_true",
+                         help="Exit with code 1 if any duplicates found (for CI/CD)")
+    p_class.add_argument("--no-recurse", action="store_true",
+                         help="Do not recurse into subdirectories")
+    p_class.set_defaults(func=cmd_class_scan)
 
     # ── health ─────────────────────────────────
     p_health = sub.add_parser("health", help="Show health score for a codebase")
