@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import os
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
@@ -882,7 +883,9 @@ with tab_scan:
 with tab_class_scan:
     st.subheader("Class Scan: find structurally duplicate classes (V2 engine)")
     st.write(
-        "Upload `.py` files — SIR V2 hashes each class using a Merkle tree over its methods. "
+        "Upload `.py`, `.java`, `.cs`, `.kt`, `.swift`, `.cpp`, `.php`, `.dart`, `.scala`, or `.rb` files — "
+        "SIR V2 hashes each class using a Merkle tree over its methods. "
+        "Non-Python files are translated to Python via AI before hashing. "
         "Two classes with identical logic but different names, variable names, or method order will produce the same hash."
     )
 
@@ -898,8 +901,8 @@ with tab_class_scan:
         st.error("sir2_core.py not found — make sure it is in the same directory as sir_ui.py.")
     else:
         cs_uploaded = st.file_uploader(
-            "Upload Python files",
-            type=["py"],
+            "Upload Python or OOP source files",
+            type=["py", "java", "cs", "kt", "swift", "cpp", "cc", "php", "dart", "scala", "rb"],
             accept_multiple_files=True,
             key="class_scan_upload",
         )
@@ -932,10 +935,58 @@ with tab_class_scan:
             if not file_sources:
                 st.warning("No files to scan.")
             else:
+                _ai_cfg = get_ai_config()
+                all_classes = []
+                errors_ai_cls = 0
                 with st.spinner("Hashing classes…"):
-                    all_classes = []
                     for fname, src in file_sources.items():
-                        all_classes.extend(_extract_classes(src, fname))
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext == ".py":
+                            all_classes.extend(_extract_classes(src, fname))
+                        else:
+                            try:
+                                from sir_ai_translate import (
+                                    detect_language as _detect_lang_cls,
+                                    extract_raw_classes as _extract_raw_classes,
+                                    translate_class_to_python as _translate_class,
+                                )
+                            except ImportError:
+                                st.warning(f"sir_ai_translate.py not found — skipping {fname}")
+                                continue
+
+                            if _ai_cfg["backend"] == "none":
+                                st.warning(
+                                    "No AI backend configured — skipping non-Python files. "
+                                    "Set up Ollama or add an Anthropic API key in the sidebar."
+                                )
+                                break
+
+                            lang = _detect_lang_cls(fname) or "Unknown"
+                            raw_classes = _extract_raw_classes(src, lang)
+                            if not raw_classes:
+                                st.info(f"No classes found in {fname} ({lang})")
+                                continue
+
+                            for cls_name, cls_lineno, cls_src in raw_classes:
+                                tr = _translate_class(
+                                    cls_src, lang,
+                                    backend=_ai_cfg["backend"],
+                                    api_key=_ai_cfg["api_key"],
+                                    ollama_model=_ai_cfg["ollama_model"],
+                                    ollama_host=_ai_cfg["ollama_host"],
+                                )
+                                if tr["confidence"] == "FAILED":
+                                    errors_ai_cls += 1
+                                    st.warning(f"Could not translate `{cls_name}` in {fname}: {tr['error']}")
+                                    continue
+
+                                translated_classes = _extract_classes(tr["python_src"], fname)
+                                for cls in translated_classes:
+                                    cls.ai_translated = True
+                                    cls.ai_confidence = tr["confidence"]
+                                    cls.original_language = lang
+                                    cls.lineno = cls_lineno
+                                all_classes.extend(translated_classes)
 
                 if not all_classes:
                     st.info("No classes with methods found in the uploaded files.")
@@ -950,20 +1001,26 @@ with tab_class_scan:
                     total_cls = len(all_classes)
                     dup_cls = sum(len(c.members) for c in exact_clusters)
                     health = max(0, round((1 - dup_cls / total_cls) * 100)) if total_cls else 100
+                    ai_translated_count = sum(1 for c in all_classes if c.ai_translated)
 
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Classes found", total_cls)
                     m2.metric("Exact clusters", len(exact_clusters))
                     m3.metric("Similar pairs", len(similar_pairs))
-                    health_color = "normal" if health >= 80 else "off"
                     m4.metric("Health", f"{health}/100", delta=None)
+
+                    if ai_translated_count:
+                        st.caption(f"{ai_translated_count} class(es) processed via AI translation.")
+                    if errors_ai_cls:
+                        st.caption(f"{errors_ai_cls} class(es) could not be translated.")
 
                     # ── Hash table ──
                     with st.expander("Class hash table", expanded=False):
                         for cls in all_classes:
                             methods_str = ", ".join(m.name for m in cls.methods)
+                            lang_note = f" [{cls.original_language}→Python]" if cls.ai_translated else ""
                             st.code(
-                                f"{cls.name:30s} ({cls.file})  "
+                                f"{cls.name:30s} ({cls.file}){lang_note}  "
                                 f"hash: {cls.class_hash[:20]}  "
                                 f"methods: [{methods_str}]",
                                 language=None,
@@ -973,18 +1030,15 @@ with tab_class_scan:
                     if exact_clusters:
                         st.markdown(f"### Exact duplicate classes — {len(exact_clusters)} cluster(s)")
                         for cluster in sorted(exact_clusters, key=lambda c: -len(c.members)):
-                            names = " · ".join(
-                                f"`{cls.name}` ({cls.file} line {cls.lineno})"
-                                for cls in cluster.members
-                            )
                             with st.expander(
                                 f"🔴 {len(cluster.members)} copies — {cluster.class_hash[:20]}…",
                                 expanded=True,
                             ):
                                 for cls in cluster.members:
                                     methods_str = ", ".join(m.name for m in cls.methods)
+                                    lang_note = f" *(AI translated from {cls.original_language})*" if cls.ai_translated else ""
                                     st.markdown(
-                                        f"**`{cls.name}`** — `{cls.file}` line {cls.lineno}  \n"
+                                        f"**`{cls.name}`** — `{cls.file}` line {cls.lineno}{lang_note}  \n"
                                         f"Methods: `{methods_str}`"
                                     )
                     else:

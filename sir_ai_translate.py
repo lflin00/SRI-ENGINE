@@ -502,6 +502,205 @@ def extract_raw_functions(src: str, language: str) -> List[Tuple[str, int, str]]
 
 
 # ─────────────────────────────────────────────
+#  Class extraction and translation
+# ─────────────────────────────────────────────
+
+CLASS_PATTERNS = {
+    'java':   r'(?:(?:public|private|protected|abstract|final|static)\s+)*class\s+(\w+)',
+    'csharp': r'(?:(?:public|private|protected|internal|abstract|sealed|static|partial)\s+)*class\s+(\w+)',
+    'kotlin': r'(?:(?:open|abstract|data|sealed|inner|enum)\s+)*class\s+(\w+)',
+    'swift':  r'(?:(?:open|public|internal|private|fileprivate|final)\s+)*class\s+(\w+)',
+    'cpp':    r'class\s+(\w+)',
+    'php':    r'(?:(?:abstract|final)\s+)*class\s+(\w+)',
+    'dart':   r'(?:(?:abstract)\s+)*class\s+(\w+)',
+    'scala':  r'(?:(?:abstract|case|sealed)\s+)*class\s+(\w+)',
+    'ruby':   r'^\s*class\s+(\w+)',
+}
+
+TRANSLATE_CLASS_PROMPT = """You are a code translation engine. Convert this {language} class to an equivalent Python 3 class.
+
+RULES:
+1. Preserve exact logical structure — do NOT simplify, optimize, or restructure
+2. Translate each method's control flow literally (for loops stay for loops, while stays while)
+3. Use only built-in Python — no external libraries
+4. Keep field and method names identical to the original
+5. Use self as the first parameter for all instance methods; add __init__ if constructor logic exists
+6. Output ONLY a valid Python class definition — no explanation, no markdown, no backticks, no comments{hints}
+
+Input:
+{code}
+
+Python translation:"""
+
+
+def validate_python_class(code: str) -> Tuple[bool, str]:
+    """Validate that code is parseable Python containing at least one class."""
+    if not code or not code.strip():
+        return False, "Empty translation"
+    try:
+        tree = _ast.parse(code)
+        has_class = any(isinstance(n, _ast.ClassDef) for n in _ast.walk(tree))
+        if not has_class:
+            return False, "No class definition found in translation"
+        return True, ""
+    except SyntaxError as e:
+        return False, f"SyntaxError line {e.lineno}: {e.msg}"
+    except Exception as e:
+        return False, str(e)
+
+
+def clean_class_translation(raw: str) -> str:
+    """Strip markdown artifacts and find the first class definition."""
+    raw = re.sub(r'```[\w]*', '', raw)
+    raw = re.sub(r'`', '', raw)
+    raw = raw.strip()
+    lines = raw.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith('class '):
+            return '\n'.join(lines[i:]).strip()
+    return raw.strip()
+
+
+def extract_raw_classes(src: str, language: str) -> List[Tuple[str, int, str]]:
+    """Extract raw class blocks from source. Returns [(name, lineno, raw_src)]."""
+    lang_lower = language.lower().replace('+', 'p').replace('#', 'sharp').replace('/', '')
+    lang_key = None
+    for key in CLASS_PATTERNS:
+        if key in lang_lower or lang_lower.startswith(key):
+            lang_key = key
+            break
+
+    results = []
+    lines = src.splitlines()
+
+    if lang_key == 'ruby':
+        i = 0
+        while i < len(lines):
+            m = re.match(CLASS_PATTERNS['ruby'], lines[i])
+            if m:
+                name = m.group(1)
+                block = [lines[i]]
+                start_lineno = i + 1
+                i += 1
+                depth = 1
+                while i < len(lines) and depth > 0:
+                    ln = lines[i].strip()
+                    if re.match(r'(class|module|def|if|unless|while|until|for|begin)\b', ln):
+                        depth += 1
+                    if re.match(r'end\b', ln):
+                        depth -= 1
+                    block.append(lines[i])
+                    i += 1
+                results.append((name, start_lineno, '\n'.join(block)))
+            else:
+                i += 1
+    elif lang_key:
+        pattern = CLASS_PATTERNS[lang_key]
+        for match in re.finditer(pattern, src, re.MULTILINE):
+            name = match.group(1)
+            brace_pos = src.find('{', match.start())
+            if brace_pos == -1:
+                continue
+            depth = 0
+            end = brace_pos
+            for idx in range(brace_pos, len(src)):
+                if src[idx] == '{':
+                    depth += 1
+                elif src[idx] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = idx + 1
+                        break
+            raw = src[match.start():end]
+            lineno = src[:match.start()].count('\n') + 1
+            results.append((name, lineno, raw))
+    else:
+        # Generic fallback: look for "class ClassName"
+        for match in re.finditer(r'class\s+(\w+)', src, re.MULTILINE):
+            name = match.group(1)
+            lineno = src[:match.start()].count('\n') + 1
+            line_start = src[:match.start()].count('\n')
+            block = lines[line_start:line_start + 60]
+            results.append((name, lineno, '\n'.join(block)))
+
+    return results
+
+
+def translate_class_to_python(
+    code: str,
+    language: str,
+    backend: str = "ollama",
+    api_key: str = "",
+    ollama_model: str = "codellama:7b",
+    ollama_host: str = "http://localhost:11434",
+    use_cache: bool = True,
+    max_retries: int = 2,
+) -> dict:
+    """
+    Translate a class definition to Python with validation and caching.
+
+    Returns:
+    {
+        "python_src":  str   — translated Python class
+        "confidence":  str   — MEDIUM or FAILED
+        "cache_hit":   bool  — True if from cache
+        "error":       str   — error message if FAILED
+    }
+    """
+    cache_lang_key = f"class:{language}"
+
+    def _fail(msg: str) -> dict:
+        r = {"python_src": "", "confidence": "FAILED", "cache_hit": False, "error": msg}
+        if use_cache:
+            cache_set(code, cache_lang_key, r)
+        return r
+
+    if use_cache:
+        cached = cache_get(code, cache_lang_key)
+        if cached:
+            return {**cached, "cache_hit": True}
+
+    hint = LANG_HINTS.get(language, "")
+    hints_line = f"\n6. LANGUAGE NOTES: {hint}" if hint else ""
+
+    def _do_translate() -> str:
+        prompt = TRANSLATE_CLASS_PROMPT.format(language=language, code=code, hints=hints_line)
+        if backend == "ollama":
+            raw = call_ollama(prompt, model=ollama_model, host=ollama_host)
+        elif backend == "anthropic":
+            raw = call_anthropic(prompt, api_key=api_key)
+        else:
+            return ""
+        return clean_class_translation(raw)
+
+    py1 = ""
+    last_err = ""
+    for attempt in range(max_retries):
+        try:
+            raw = _do_translate()
+            valid, err = validate_python_class(raw)
+            if valid:
+                py1 = raw
+                break
+            else:
+                last_err = err
+                if attempt < max_retries - 1:
+                    time.sleep(0.5)
+        except Exception as e:
+            last_err = str(e)
+            if attempt < max_retries - 1:
+                time.sleep(0.5)
+
+    if not py1:
+        return _fail(f"Invalid Python class after {max_retries} attempts: {last_err}")
+
+    result = {"python_src": py1, "confidence": "MEDIUM", "cache_hit": False, "error": ""}
+    if use_cache:
+        cache_set(code, cache_lang_key, result)
+    return result
+
+
+# ─────────────────────────────────────────────
 #  Confidence display helpers
 # ─────────────────────────────────────────────
 
