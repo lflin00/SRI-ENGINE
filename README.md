@@ -119,6 +119,90 @@ sir diff <path1> <path2>
 
 ---
 
+## GitHub Actions
+
+Add SIR Engine as an automatic pull request check in any GitHub repository.
+
+### Quick setup
+
+Copy the workflow file into your repo and push:
+
+```bash
+mkdir -p .github/workflows
+curl -sSL https://raw.githubusercontent.com/lflin00/SIR-ENGINE/main/.github/workflows/sir-scan.yml \
+  -o .github/workflows/sir-scan.yml
+git add .github/workflows/sir-scan.yml
+git commit -m "Add SIR Engine semantic duplicate check"
+git push
+```
+
+The check runs automatically on every pull request. No secrets required for native Python / JS / TS scanning.
+
+### What it does
+
+1. **Detects changed files** — diffs HEAD against the PR base, filters to `.py`, `.js`, `.ts`, `.jsx`, `.tsx`
+2. **Scans the full configured path** — runs `sir scan` across the repo (or the directory you specify), so cross-file duplicates are caught even when only one side of the duplicate changed
+3. **Posts a PR comment** — lists every duplicate cluster that touches a changed file, with function name, file path, and line number; the comment is updated in place on every new push so it never spams the thread
+4. **Optionally fails the check** — set `SIR_STRICT: "true"` to block merges until duplicates are resolved
+
+### Configuration
+
+Edit the `env` block near the top of the workflow file:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SIR_STRICT` | `"false"` | `"true"` → fail the check if duplicates are found in changed files |
+| `SIR_MIN_CLUSTER_SIZE` | `"2"` | Minimum copies to report as a duplicate cluster |
+| `SIR_SCAN_PATH` | `"."` | Root directory to scan (relative to repo root) |
+| `SIR_AI_BACKEND` | `""` | `"anthropic"` to also scan Java, Go, Rust, C, C#, Swift, Kotlin, and 20+ other languages |
+
+### Strict mode
+
+```yaml
+# .github/workflows/sir-scan.yml
+env:
+  SIR_STRICT: "true"
+```
+
+The PR check turns red and blocks merging until all duplicate clusters in the changed files are resolved.
+
+### AI-powered scanning (multi-language)
+
+```yaml
+env:
+  SIR_AI_BACKEND: "anthropic"
+```
+
+Add your Anthropic API key as a repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions → New repository secret). The action will translate Java, Go, Rust, C, C#, and other languages to Python before hashing, enabling cross-language duplicate detection across the whole PR.
+
+### Reusable workflow
+
+Instead of copying the file, call the workflow directly from the SIR Engine repository:
+
+```yaml
+# .github/workflows/pr-checks.yml  (in your repo)
+name: PR Checks
+
+on:
+  pull_request:
+
+jobs:
+  sir-scan:
+    uses: lflin00/SIR-ENGINE/.github/workflows/sir-scan.yml@main
+    with:
+      strict: true
+      min_cluster_size: 2
+      scan_path: "src"
+      ai_backend: ""
+      base_sha: ${{ github.event.pull_request.base.sha }}
+      head_sha: ${{ github.sha }}
+      pr_number: ${{ github.event.pull_request.number }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+---
+
 ## Pack Format
 
 SIR Engine can export semantic fingerprints of entire codebases as portable `.sir.json` files. This lets you:

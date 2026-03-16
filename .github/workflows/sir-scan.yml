@@ -1,0 +1,594 @@
+# .github/workflows/sir-scan.yml
+#
+# SIR Engine — Semantic Duplicate Check
+# ─────────────────────────────────────────────────────────────────────────────
+# Runs on every pull request. Scans changed Python / JS / TS files for
+# semantically duplicate functions and posts a summary comment on the PR.
+#
+# LICENSING
+#   Public repositories  — free, no license key required.
+#   Private repositories — requires a SIR_LICENSE_KEY repository secret.
+#                          Get a license at sir-engine.com.
+#
+# QUICK START (adding to your own repo):
+#   1. Copy this file to .github/workflows/sir-scan.yml in your repo.
+#   2. Edit the env vars in the "Configuration" block below.
+#   3. For private repos, add SIR_LICENSE_KEY to Settings → Secrets → Actions.
+#   4. Push — the check runs automatically on every PR.
+#
+# See README.md → "GitHub Actions" for the full setup guide.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: SIR Engine — Semantic Duplicate Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      strict:
+        description: "Fail the check if duplicates are found in changed files"
+        type: boolean
+        default: false
+      min_cluster_size:
+        description: "Minimum copies to count as a duplicate cluster"
+        type: number
+        default: 2
+      scan_path:
+        description: "Root directory to scan (relative to repo root)"
+        type: string
+        default: "."
+      ai_backend:
+        description: "AI backend for non-Python/JS files: '' (off) or 'anthropic'"
+        type: string
+        default: ""
+      base_sha:
+        description: "PR base commit SHA — pass github.event.pull_request.base.sha from the caller"
+        type: string
+        default: ""
+      head_sha:
+        description: "PR head commit SHA — pass github.sha from the caller"
+        type: string
+        default: ""
+      pr_number:
+        description: "PR number — pass github.event.pull_request.number from the caller"
+        type: string
+        default: ""
+    secrets:
+      SIR_LICENSE_KEY:
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write   # required to post and update PR comments
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+# Edit these when copying this file into your own repo.
+# workflow_call inputs (above) take precedence when the workflow is called
+# from another workflow; these env vars are the defaults for direct PR triggers.
+env:
+  SIR_STRICT: "false"         # "true" → block merges until duplicates are resolved
+  SIR_MIN_CLUSTER_SIZE: "2"   # minimum copies to flag as a duplicate cluster
+  SIR_SCAN_PATH: "."          # root path to scan (relative to repo root)
+  SIR_AI_BACKEND: ""          # "" = Python/JS/TS only | "anthropic" = also scan other languages
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  sir-scan:
+    name: Semantic Duplicate Check
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Python ────────────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # ── 3. Fetch SIR Engine ──────────────────────────────────────────────────
+      - name: Fetch SIR Engine
+        run: |
+          if [ -f "sir_cli.py" ]; then
+            echo "sir_cli.py found in repo — skipping clone."
+            echo "SIR_DIR=." >> "$GITHUB_ENV"
+          else
+            git clone --depth 1 https://github.com/lflin00/SIR-ENGINE.git .sir_engine
+            echo "SIR_DIR=.sir_engine" >> "$GITHUB_ENV"
+          fi
+
+      # ── 4. Install dependencies ──────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          BACKEND="${{ inputs.ai_backend }}"
+          [ -z "$BACKEND" ] && BACKEND="$SIR_AI_BACKEND"
+          if [ "$BACKEND" = "anthropic" ]; then
+            pip install --quiet anthropic
+          fi
+
+      # ── 5. Resolve configuration ─────────────────────────────────────────────
+      - name: Resolve configuration
+        id: config
+        run: |
+          STRICT="${{ inputs.strict }}"
+          [ -z "$STRICT" ] && STRICT="$SIR_STRICT"
+
+          MIN="${{ inputs.min_cluster_size }}"
+          [ -z "$MIN" ] && MIN="$SIR_MIN_CLUSTER_SIZE"
+
+          SCANPATH="${{ inputs.scan_path }}"
+          [ -z "$SCANPATH" ] && SCANPATH="$SIR_SCAN_PATH"
+
+          AI="${{ inputs.ai_backend }}"
+          [ -z "$AI" ] && AI="$SIR_AI_BACKEND"
+
+          BASE="${{ inputs.base_sha }}"
+          [ -z "$BASE" ] && BASE="${{ github.event.pull_request.base.sha }}"
+
+          HEAD="${{ inputs.head_sha }}"
+          [ -z "$HEAD" ] && HEAD="${{ github.sha }}"
+
+          PRNUM="${{ inputs.pr_number }}"
+          [ -z "$PRNUM" ] && PRNUM="${{ github.event.pull_request.number }}"
+
+          echo "strict=$STRICT"       >> "$GITHUB_OUTPUT"
+          echo "min=$MIN"             >> "$GITHUB_OUTPUT"
+          echo "scan_path=$SCANPATH"  >> "$GITHUB_OUTPUT"
+          echo "ai_backend=$AI"       >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE"       >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD"       >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PRNUM"     >> "$GITHUB_OUTPUT"
+
+      # ── 6. Check license ─────────────────────────────────────────────────────
+      # Public repos: always licensed (free tier).
+      # Private repos: require SIR_LICENSE_KEY validated against the API.
+      # If the validation API is unreachable, we fail open so paying customers
+      # are never blocked by a transient outage.
+      - name: Check license
+        id: license
+        env:
+          SIR_LICENSE_KEY: ${{ secrets.SIR_LICENSE_KEY }}
+        run: |
+          python3 << 'PYEOF'
+          import hashlib, json, os, sys, urllib.request, urllib.error
+
+          VALIDATE_URL = "https://api.sir-engine.com/validate"
+          GITHUB_OUTPUT = os.environ["GITHUB_OUTPUT"]
+
+          def output(key, value):
+              with open(GITHUB_OUTPUT, "a") as f:
+                  f.write(f"{key}={value}\n")
+
+          is_private = "${{ github.event.repository.private }}" == "true"
+          key = os.environ.get("SIR_LICENSE_KEY", "").strip()
+
+          # ── Public repo: always free ──────────────────────────────────────
+          if not is_private:
+              print("Public repository — license not required.")
+              output("licensed", "true")
+              output("reason", "public")
+              sys.exit(0)
+
+          # ── Private repo: no key provided ────────────────────────────────
+          if not key:
+              print("Private repository — SIR_LICENSE_KEY secret not set.")
+              output("licensed", "false")
+              output("reason", "no_key")
+              sys.exit(0)
+
+          # ── Private repo: validate key against API ────────────────────────
+          try:
+              payload = json.dumps({"key": key}).encode()
+              req = urllib.request.Request(
+                  VALIDATE_URL,
+                  data=payload,
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  data = json.loads(resp.read())
+
+              print(f"License valid — issued to: {data.get('issued_to', 'unknown')}")
+              output("licensed", "true")
+              output("reason", "valid_key")
+              output("customer", data.get("issued_to", ""))
+
+          except urllib.error.HTTPError as e:
+              if e.code in (401, 403):
+                  print(f"License invalid or expired (HTTP {e.code}).")
+                  output("licensed", "false")
+                  output("reason", "invalid_key")
+              else:
+                  # Unexpected server error — fail open to protect paying customers
+                  print(f"Warning: license API returned HTTP {e.code} — proceeding.")
+                  output("licensed", "true")
+                  output("reason", "api_error")
+
+          except Exception as e:
+              # Network error — fail open
+              print(f"Warning: could not reach license API ({e}) — proceeding.")
+              output("licensed", "true")
+              output("reason", "api_error")
+          PYEOF
+
+      # ── 7. Post upgrade prompt (unlicensed private repos) ────────────────────
+      - name: Post upgrade prompt
+        if: steps.license.outputs.licensed == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.config.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          REASON: ${{ steps.license.outputs.reason }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, urllib.request
+
+          MARKER = "<!-- sir-engine-bot -->"
+          token     = os.environ["GITHUB_TOKEN"]
+          repo      = os.environ["REPO"]
+          pr_number = int(os.environ["PR_NUMBER"])
+          reason    = os.environ.get("REASON", "no_key")
+
+          if reason == "invalid_key":
+              key_msg = (
+                  "> :warning: &nbsp;The `SIR_LICENSE_KEY` secret in this repository "
+                  "is invalid or has expired. "
+                  "[Manage your license at sir-engine.com →](https://sir-engine.com)"
+              )
+          else:
+              key_msg = (
+                  "> :key: &nbsp;Add your license key as a repository secret named "
+                  "`SIR_LICENSE_KEY` under **Settings → Secrets and variables → Actions**."
+              )
+
+          body = "\n".join([
+              MARKER,
+              "",
+              "## SIR Engine &nbsp;·&nbsp; License Required",
+              "",
+              "SIR Engine's GitHub Action is **free for public repositories**.",
+              "",
+              f"This repository is **private** — a license is required to run "
+              f"semantic duplicate checks in CI/CD.",
+              "",
+              "[**Get a license at sir-engine.com →**](https://sir-engine.com)",
+              "",
+              key_msg,
+              "",
+              "---",
+              "*The CLI tool (`sir scan`) remains free for all use. "
+              "Install it locally to scan without a license.*",
+          ])
+
+          api = "https://api.github.com"
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "Content-Type": "application/json",
+          }
+
+          # Find and update an existing SIR comment, or post a new one
+          req = urllib.request.Request(
+              f"{api}/repos/{repo}/issues/{pr_number}/comments?per_page=100",
+              headers=headers,
+          )
+          with urllib.request.urlopen(req) as resp:
+              comments = json.loads(resp.read())
+
+          existing_id = next(
+              (c["id"] for c in comments if MARKER in c.get("body", "")), None
+          )
+
+          payload = json.dumps({"body": body}).encode()
+          if existing_id:
+              req = urllib.request.Request(
+                  f"{api}/repos/{repo}/issues/comments/{existing_id}",
+                  data=payload, headers=headers, method="PATCH",
+              )
+          else:
+              req = urllib.request.Request(
+                  f"{api}/repos/{repo}/issues/{pr_number}/comments",
+                  data=payload, headers=headers,
+              )
+          with urllib.request.urlopen(req) as resp:
+              result = json.loads(resp.read())
+              print(f"Comment posted: {result['html_url']}")
+          PYEOF
+
+      # ── 8. Detect changed files ──────────────────────────────────────────────
+      - name: Detect changed Python / JS / TS files
+        if: steps.license.outputs.licensed == 'true'
+        id: changed
+        run: |
+          BASE="${{ steps.config.outputs.base_sha }}"
+          HEAD="${{ steps.config.outputs.head_sha }}"
+
+          git diff --name-only "$BASE" "$HEAD" > /tmp/all_changed.txt
+          grep -E '\.(py|js|ts|jsx|tsx)$' /tmp/all_changed.txt \
+            > /tmp/sir_changed.txt || true
+
+          COUNT=$(wc -l < /tmp/sir_changed.txt | tr -d ' ')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          echo "Changed files ($COUNT relevant for SIR scan):"
+          cat /tmp/sir_changed.txt
+
+      # ── 9. Early exit if nothing relevant changed ────────────────────────────
+      - name: Skip — no Python / JS / TS files changed
+        if: steps.license.outputs.licensed == 'true' && steps.changed.outputs.count == '0'
+        run: echo "No Python, JS, or TS files changed in this PR — skipping scan."
+
+      # ── 10. Run native scan (Python + JS / TS) ───────────────────────────────
+      - name: Run SIR scan (Python + JS / TS)
+        if: steps.license.outputs.licensed == 'true' && steps.changed.outputs.count != '0'
+        run: |
+          python3 "$SIR_DIR/sir_cli.py" scan \
+            "${{ steps.config.outputs.scan_path }}" \
+            --min "${{ steps.config.outputs.min }}" \
+            --output sir_report.json \
+          || true
+
+      # ── 11. Run AI scan (optional) ───────────────────────────────────────────
+      - name: Run SIR AI scan
+        if: >-
+          steps.license.outputs.licensed == 'true' &&
+          steps.changed.outputs.count != '0' &&
+          steps.config.outputs.ai_backend != ''
+        run: |
+          python3 "$SIR_DIR/sir_cli.py" ai-scan \
+            "${{ steps.config.outputs.scan_path }}" \
+            --backend "${{ steps.config.outputs.ai_backend }}" \
+            --output sir_ai_report.json \
+          || true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # ── 12. Post PR comment ──────────────────────────────────────────────────
+      - name: Post PR comment
+        if: steps.license.outputs.licensed == 'true' && steps.changed.outputs.count != '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.config.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          SIR_STRICT: ${{ steps.config.outputs.strict }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys, urllib.request
+
+          MARKER = "<!-- sir-engine-bot -->"
+
+          def load_report(path):
+              try:
+                  with open(path) as f:
+                      return json.load(f)
+              except (FileNotFoundError, json.JSONDecodeError):
+                  return None
+
+          def load_changed():
+              try:
+                  with open("/tmp/sir_changed.txt") as f:
+                      return {ln.strip() for ln in f if ln.strip()}
+              except FileNotFoundError:
+                  return set()
+
+          def relevant_clusters(report, changed):
+              if not report:
+                  return []
+              return [
+                  c for c in report.get("duplicates", [])
+                  if any(o["file"] in changed for o in c.get("occurrences", []))
+              ]
+
+          def cluster_rows(clusters, changed, extra_cols=False):
+              lines = []
+              for i, cluster in enumerate(clusters, 1):
+                  h = cluster.get("hash", "")
+                  occs = cluster.get("occurrences", [])
+                  lines.append(
+                      f"#### Cluster {i} &nbsp;·&nbsp; "
+                      f"`{h}…` &nbsp;·&nbsp; {len(occs)} copies"
+                  )
+                  lines.append("")
+                  if extra_cols:
+                      lines.append("| Function | File | Language | Confidence | Line |")
+                      lines.append("|----------|------|----------|------------|-----:|")
+                  else:
+                      lines.append("| Function | File | Line |")
+                      lines.append("|----------|------|-----:|")
+                  for o in occs:
+                      tag = " &nbsp;◀ **in this PR**" if o["file"] in changed else ""
+                      if extra_cols:
+                          lines.append(
+                              f"| `{o['name']}` | `{o['file']}` "
+                              f"| {o.get('lang', '')} | {o.get('confidence', '')} "
+                              f"| {o['lineno']}{tag} |"
+                          )
+                      else:
+                          lines.append(
+                              f"| `{o['name']}` | `{o['file']}` | {o['lineno']}{tag} |"
+                          )
+                  lines.append("")
+              return lines
+
+          def build_comment(native, ai_clusters, report, changed, strict):
+              total = len(native) + len(ai_clusters)
+              health = report.get("health_score", "n/a") if report else "n/a"
+              total_fns = report.get("total_functions", 0) if report else 0
+              files_scanned = report.get("files", 0) if report else 0
+
+              lines = [MARKER, ""]
+              lines.append("## SIR Engine &nbsp;·&nbsp; Semantic Duplicate Report")
+              lines.append("")
+
+              if total == 0:
+                  lines.append(
+                      ":white_check_mark: &nbsp;**No semantic duplicates** found "
+                      "in the files changed by this PR."
+                  )
+              else:
+                  noun = "cluster" if total == 1 else "clusters"
+                  lines.append(
+                      f":warning: &nbsp;**{total} duplicate {noun}** found "
+                      "in this PR's changed files."
+                  )
+
+              lines.append("")
+              lines.append(
+                  f"> Scanned **{files_scanned} file(s)** &nbsp;/&nbsp; "
+                  f"**{total_fns} function(s)** &nbsp;·&nbsp; "
+                  f"Health score: **{health}/100**"
+              )
+              lines.append("")
+
+              if native:
+                  lines.append("<details>")
+                  lines.append(
+                      f"<summary>Python / JS / TS &nbsp;—&nbsp; "
+                      f"<strong>{len(native)} cluster(s)</strong></summary>"
+                  )
+                  lines.append("")
+                  lines.extend(cluster_rows(native, changed, extra_cols=False))
+                  lines.append("</details>")
+                  lines.append("")
+
+              if ai_clusters:
+                  lines.append("<details>")
+                  lines.append(
+                      f"<summary>AI-translated languages &nbsp;—&nbsp; "
+                      f"<strong>{len(ai_clusters)} cluster(s)</strong></summary>"
+                  )
+                  lines.append("")
+                  lines.extend(cluster_rows(ai_clusters, changed, extra_cols=True))
+                  lines.append("</details>")
+                  lines.append("")
+
+              if total > 0 and strict == "true":
+                  lines.append(
+                      "> :no_entry: &nbsp;**Strict mode is enabled.** "
+                      "This check will fail until all duplicate clusters "
+                      "in the changed files are resolved."
+                  )
+                  lines.append("")
+
+              lines.append("---")
+              lines.append(
+                  "*Powered by [SIR Engine](https://sir-engine.com) &nbsp;·&nbsp; "
+                  "[What is semantic duplication?]"
+                  "(https://github.com/lflin00/SIR-ENGINE#how-it-works)*"
+              )
+
+              return "\n".join(lines)
+
+          def gh_api(method, url, token, data=None):
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
+              if data is not None:
+                  headers["Content-Type"] = "application/json"
+              req = urllib.request.Request(url, data=data, headers=headers, method=method)
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read())
+
+          def post_or_update(body, token, repo, pr_number):
+              api = "https://api.github.com"
+              try:
+                  comments = gh_api(
+                      "GET",
+                      f"{api}/repos/{repo}/issues/{pr_number}/comments?per_page=100",
+                      token,
+                  )
+              except Exception as e:
+                  print(f"Warning: could not fetch comments: {e}", file=sys.stderr)
+                  comments = []
+
+              existing_id = next(
+                  (c["id"] for c in comments if MARKER in c.get("body", "")), None
+              )
+
+              payload = json.dumps({"body": body}).encode()
+              try:
+                  if existing_id:
+                      result = gh_api(
+                          "PATCH",
+                          f"{api}/repos/{repo}/issues/comments/{existing_id}",
+                          token, payload,
+                      )
+                      print(f"Updated existing comment: {result['html_url']}")
+                  else:
+                      result = gh_api(
+                          "POST",
+                          f"{api}/repos/{repo}/issues/{pr_number}/comments",
+                          token, payload,
+                      )
+                      print(f"Posted new comment: {result['html_url']}")
+              except Exception as e:
+                  print(f"Warning: could not post comment: {e}", file=sys.stderr)
+
+          report    = load_report("sir_report.json")
+          ai_report = load_report("sir_ai_report.json")
+          changed   = load_changed()
+          strict    = os.environ.get("SIR_STRICT", "false")
+          token     = os.environ["GITHUB_TOKEN"]
+          repo      = os.environ["REPO"]
+          pr_number = int(os.environ["PR_NUMBER"])
+
+          native   = relevant_clusters(report, changed)
+          ai_dupes = relevant_clusters(ai_report, changed)
+
+          body = build_comment(native, ai_dupes, report, changed, strict)
+          post_or_update(body, token, repo, pr_number)
+          PYEOF
+
+      # ── 13. Enforce strict mode ──────────────────────────────────────────────
+      - name: Enforce strict mode
+        if: >-
+          steps.license.outputs.licensed == 'true' &&
+          steps.changed.outputs.count != '0' &&
+          steps.config.outputs.strict == 'true'
+        run: |
+          python3 << 'PYEOF'
+          import json, sys
+
+          def relevant_count(path, changed):
+              try:
+                  with open(path) as f:
+                      data = json.load(f)
+              except (FileNotFoundError, json.JSONDecodeError):
+                  return 0
+              return sum(
+                  1 for c in data.get("duplicates", [])
+                  if any(o["file"] in changed for o in c.get("occurrences", []))
+              )
+
+          try:
+              with open("/tmp/sir_changed.txt") as f:
+                  changed = {ln.strip() for ln in f if ln.strip()}
+          except FileNotFoundError:
+              changed = set()
+
+          total = (
+              relevant_count("sir_report.json", changed)
+              + relevant_count("sir_ai_report.json", changed)
+          )
+
+          if total > 0:
+              noun = "cluster" if total == 1 else "clusters"
+              print(
+                  f"::error::SIR Engine (strict mode): {total} duplicate {noun} "
+                  "found in changed files. Resolve duplicates before merging."
+              )
+              sys.exit(1)
+          else:
+              print("Strict mode: no duplicates in changed files — check passed.")
+          PYEOF
