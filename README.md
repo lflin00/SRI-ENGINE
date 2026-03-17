@@ -240,7 +240,19 @@ Source code (any language)
 
 ## License
 
-Business Source License (BSL). Free for personal and open-source use. Contact for commercial licensing.
+**Proprietary Source-Available License** — the source code is visible but not free to use commercially.
+
+| Use case | Allowed |
+|---|---|
+| Personal projects | Free |
+| Education / academic research | Free |
+| Open source projects | Free |
+| Company internal use | **Requires commercial license** |
+| Scanning production code | **Requires commercial license** |
+| SaaS / hosted offering | **Requires commercial license** |
+| Client / for-profit work | **Requires commercial license** |
+
+For commercial licensing: [sir-engine.com](https://sir-engine.com)
 
 ---
 
