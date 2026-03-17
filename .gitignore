@@ -14,3 +14,9 @@ restored_*/
 CLAUDE.md
 MISTAKES.md
 SUCCESS.md
+scripts/generate_key.py
+api/app.py
+.sir_cache/
+out.py
+zenith_wrap.py
+skills/
